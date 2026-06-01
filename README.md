@@ -430,28 +430,28 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 
 ## Roadmap
 
-### Phase 1 - Single cluster, volume CRUD (current)
+### Phase 1 — Single cluster, volume CRUD (current)
 
 - Single Lightbits cluster per storage entry
 - Full volume lifecycle for VM disks: create, attach, detach, delete
+- Per-VM ownership labels and node-aware filtering (multi-hypervisor safety)
 - NVMe-oF TCP transport
 - Storage capacity reporting
 
-### Phase 2 - Reliability and operations
+### Phase 2 and beyond
 
-- Multi-path NVMe-oF support
-- Configurable replica count
-- Live migration support (multi-host ACL)
-- Proper TLS certificate validation
+On the horizon:
 
-### Phase 3 - Advanced features
+- Snapshots and clones
+- Volume resize
+- Multi-tenancy and multi-cluster support
+- Configurable replica count and multi-path NVMe-oF
+- Live migration support
+- Broader Proxmox feature coverage (containers, ISO, vTPM, backups)
+- Debian packaging
+- and more
 
-- Snapshot and clone support
-- Multi-cluster support
-- Multi-tenancy and project isolation
-- Additional NVMe-oF transports (RDMA)
-
-Contributions are welcome at any phase. See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
+Contributions welcome at any phase — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
