@@ -1,4 +1,7 @@
 #!/usr/bin/perl
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026-present Lightbits Labs Ltd.
+#
 # Node-aware ownership: when several Proxmox hypervisors share one Lightbits
 # project, list_images must only ever return volumes owned by THIS node, so a
 # VM destroy here can never delete another hypervisor's same-numbered VM disks.

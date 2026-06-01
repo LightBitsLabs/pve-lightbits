@@ -1,4 +1,7 @@
 #!/usr/bin/perl
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026-present Lightbits Labs Ltd.
+#
 # Tests for alloc_image volume naming + ownership labels.
 #
 # Volume names must be unique within a Lightbits project (LightOS enforces it),

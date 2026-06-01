@@ -115,6 +115,8 @@ For full reference see the [lbcli create jwt documentation](https://documentatio
 
 ## Installation
 
+> **Data-loss warning.** This plugin provisions and manages VM disks as volumes on a remote Lightbits cluster. Misconfiguration — wrong project name, wrong storage ID at destroy time, ACL collisions when multiple Proxmox clusters share a project, or a stale JWT pointing at the wrong cluster — can result in **permanent loss of VM disk data**. Test in a non-production environment first, keep independent backups of any data you cannot afford to lose, and double-check the cluster, project, and storage ID before any destructive `pvesm` / `qm destroy` operation.
+
 Run these commands on **each Proxmox node** that will access Lightbits storage.
 
 ### 1. Clone the repository

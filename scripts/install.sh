@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026-present Lightbits Labs Ltd.
+#
 # Lightbits Proxmox Storage Plugin — Installer
 set -euo pipefail
 
