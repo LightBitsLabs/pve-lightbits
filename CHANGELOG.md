@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - Unreleased
-
 ### Added
 
 - Initial release of the Lightbits Storage Plugin for Proxmox VE.
@@ -21,6 +19,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stable per-volume symlinks under `/dev/lightbits/<storeid>/<uuid>`.
 - `install.sh` / `uninstall.sh` scripts for each Proxmox node.
 - CI workflow: Perl syntax check, taint-mode check, unit tests via `prove`, and `shellcheck` on installer scripts.
-
-[Unreleased]: https://github.com/LightBitsLabs/pve-lightbits/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/LightBitsLabs/pve-lightbits/releases/tag/v0.1.0
