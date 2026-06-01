@@ -1,4 +1,7 @@
 #!/usr/bin/perl
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026-present Lightbits Labs Ltd.
+#
 # Regression test for list_images() volume ownership.
 #
 # When a VM is destroyed with "purge unreferenced disks", qemu-server calls
