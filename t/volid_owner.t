@@ -1,4 +1,7 @@
 #!/usr/bin/perl
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026-present Lightbits Labs Ltd.
+#
 # The volid encodes the owning vmid (vm-<vmid>-<uuid>) so that parse_volname and
 # path() can report the owner. That owner is what qemu-server's destroy_vm uses
 # to free a VM's *referenced* disks — without it, destroying a VM leaks its

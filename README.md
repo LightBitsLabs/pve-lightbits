@@ -115,6 +115,8 @@ For full reference see the [lbcli create jwt documentation](https://documentatio
 
 ## Installation
 
+> **Data-loss warning.** This plugin provisions and manages VM disks as volumes on a remote Lightbits cluster. Misconfiguration — wrong project name, wrong storage ID at destroy time, ACL collisions when multiple Proxmox clusters share a project, or a stale JWT pointing at the wrong cluster — can result in **permanent loss of VM disk data**. Test in a non-production environment first, keep independent backups of any data you cannot afford to lose, and double-check the cluster, project, and storage ID before any destructive `pvesm` / `qm destroy` operation.
+
 Run these commands on **each Proxmox node** that will access Lightbits storage.
 
 ### 1. Clone the repository
@@ -430,28 +432,28 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 
 ## Roadmap
 
-### Phase 1 - Single cluster, volume CRUD (current)
+### Phase 1 — Single cluster, volume CRUD (current)
 
 - Single Lightbits cluster per storage entry
 - Full volume lifecycle for VM disks: create, attach, detach, delete
+- Per-VM ownership labels and node-aware filtering (multi-hypervisor safety)
 - NVMe-oF TCP transport
 - Storage capacity reporting
 
-### Phase 2 - Reliability and operations
+### Phase 2 and beyond
 
-- Multi-path NVMe-oF support
-- Configurable replica count
-- Live migration support (multi-host ACL)
-- Proper TLS certificate validation
+On the horizon:
 
-### Phase 3 - Advanced features
+- Snapshots and clones
+- Volume resize
+- Multi-tenancy and multi-cluster support
+- Configurable replica count and multi-path NVMe-oF
+- Live migration support
+- Broader Proxmox feature coverage (containers, ISO, vTPM, backups)
+- Debian packaging
+- and more
 
-- Snapshot and clone support
-- Multi-cluster support
-- Multi-tenancy and project isolation
-- Additional NVMe-oF transports (RDMA)
-
-Contributions are welcome at any phase. See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
+Contributions welcome at any phase — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
