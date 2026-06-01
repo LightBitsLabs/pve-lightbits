@@ -1,0 +1,8 @@
+# Don't accidentally commit JWT tokens or local test configs
+*.env
+*.jwt
+test-config.sh
+
+# Local-only design notes and unreviewed landing-page draft
+docs/design/
+index.html
