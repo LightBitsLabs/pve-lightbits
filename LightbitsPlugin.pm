@@ -541,8 +541,74 @@ sub deactivate_volume {
 
 sub volume_has_feature {
     my ($class, $cfg, $feature, $storeid, $volname, $snap, $running) = @_;
-    my %features = (copy => 1, sparseinit => 0);
+    my %features = (copy => 1, sparseinit => 0, resize => 1);
     return $features{$feature} // 0;
+}
+
+# ── Volume resize ──────────────────────────────────────────────────────────────
+
+# Grow a Lightbits volume. PVE hands us the *new total* size in bytes (already
+# padded to a 1 KiB multiple by PVE::Storage::volume_resize); we 4 KiB-align it
+# for LightOS and PUT it. Unlike the file-based base plugin — which returns early
+# for a running guest — we resize the backing volume regardless of $running: PVE
+# issues the guest-visible block_resize to QEMU after this returns, and that
+# requires the underlying device to already be bigger.
+sub volume_resize {
+    my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
+
+    my $project = _project($scfg);
+    my $uuid    = _vol_uuid($volname);
+
+    # 4 KiB-align (Lightbits requires it), matching alloc_image.
+    my $bytes = int(($size + 4095) / 4096) * 4096;
+
+    my $body = {
+        size        => "$bytes",
+        projectName => $project,
+    };
+    _api($scfg, 'PUT', "/api/v2/volumes/$uuid?projectName=$project", $body);
+
+    # Wait for Lightbits to apply the new size across all replicas. Keep the last
+    # observed size/state so we can verify success after the loop rather than
+    # assuming it on timeout.
+    my ($cur, $state) = (0, '');
+    for my $attempt (1..60) {
+        my $vol = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+        $cur    = int($vol->{size} // 0);
+        $state  = $vol->{state} // '';
+        last if $cur >= $bytes && $state eq 'Available';
+        sleep 2;
+    }
+
+    # Fail fast if the resize never converged: returning $bytes here would make
+    # PVE (and the caller's block_resize) assume a size the volume doesn't have.
+    die "Lightbits volume $uuid resize did not complete: expected >= $bytes bytes "
+        . "in state 'Available', last saw $cur bytes in state '$state'\n"
+        if $cur < $bytes || $state ne 'Available';
+
+    # Refresh the kernel's view of the grown namespace. In practice the NVMe
+    # controller already updates the namespace capacity on its own, via an
+    # asynchronous "namespace attribute changed" event — so this rescan is a
+    # robustness backup, not the primary mechanism. It guards two cases the async
+    # path doesn't guarantee: (1) the event may not have been processed yet when
+    # PVE follows up with QEMU block_resize on a running guest (a small race), and
+    # (2) some kernel/target combinations don't emit/honor that event reliably.
+    # `nvme ns-rescan` forces a synchronous re-read, so the new size is visible
+    # before we return — cheap and idempotent. We rescan the *controller*
+    # (e.g. /dev/nvme0), not the namespace: under NVMe multipath the per-path node
+    # may not exist, and `blockdev --rereadpt` only re-reads a partition table,
+    # not the device capacity.
+    my $link = _symlink_path($storeid, $uuid);
+    if (-l $link) {
+        my $dev = readlink($link);
+        if ($dev && $dev =~ m{/dev/(nvme\d+)}) {
+            my $ctrl = $1;
+            eval { run_command(['nvme', 'ns-rescan', "/dev/$ctrl"]) };
+            warn "Could not rescan NVMe controller /dev/$ctrl after resize: $@\n" if $@;
+        }
+    }
+
+    return $bytes;
 }
 
 # NB: do not call __PACKAGE__->register() here. PVE::Storage's third-party
