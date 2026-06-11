@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Volume resize (grow), online and offline, via `qm resize` / the Proxmox UI: the Lightbits volume is grown and an `nvme ns-rescan` makes the new capacity visible to the host deterministically.
 - NVMe-oF TCP transport for block-device access (`nvme-tcp`).
 - Storage capacity reporting in the Proxmox dashboard.
+- Configurable replica count per storage via `lb_replica_count` (default 1); the requested count must be supported by the cluster (a single-node cluster requires 1).
 - Per-VM ownership labels (`pveVmid`, `pveVmgenid`, `pveNode`) and node-aware filtering so that destroying a VM never deletes another hypervisor's volumes in a shared Lightbits project.
 - Auto-fetched subsystem NQN from the cluster API, with explicit override available via `--lb_subsys_nqn`.
 - Stable per-volume symlinks under `/dev/lightbits/<storeid>/<uuid>`.
