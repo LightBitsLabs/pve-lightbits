@@ -424,7 +424,6 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 
 ## Limitations
 
-- **Single NVMe-oF endpoint**: The plugin connects to one `lb_nvme_host`. Multi-path is not yet implemented.
 - **No snapshots**: Proxmox snapshot operations are not supported by this plugin version.
 - **No live migration**: VM live migration requires shared storage visibility on both source and destination hosts. Multi-node deployment with a shared Lightbits cluster works structurally, but the per-host ACL in `alloc_image` currently restricts volume access to the allocating host's NQN. This needs to be addressed for migration support.
 - **Self-signed TLS**: SSL hostname verification is disabled to accommodate Lightbits clusters with self-signed certificates.
@@ -448,7 +447,6 @@ On the horizon:
 
 - Snapshots and clones
 - Multi-tenancy and multi-cluster support
-- Multi-path NVMe-oF
 - Live migration support
 - Broader Proxmox feature coverage (containers, ISO, vTPM, backups)
 - Debian packaging
