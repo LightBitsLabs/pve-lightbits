@@ -69,10 +69,49 @@ sub _nvme_endpoints {
     for my $e (split /,/, ($spec // '')) {
         $e =~ s/^\s+|\s+$//g;
         next unless length $e;
-        my ($h, $p) = $e =~ /^(.+):(\d+)$/ ? ($1, $2) : ($e, '4420');
+        # Capture (untaints under perl -T) and strip IPv6 brackets so the bare
+        # address is passed to `nvme -a`. IPv6 literals must be bracketed to be
+        # distinguishable from host:port.
+        my ($h, $p);
+        if    ($e =~ /^\[(.+)\]:(\d+)$/) { ($h, $p) = ($1, $2); }       # [IPv6]:port
+        elsif ($e =~ /^\[(.+)\]$/)       { ($h, $p) = ($1, '4420'); }   # [IPv6]
+        elsif ($e =~ /^(.+):(\d+)$/)     { ($h, $p) = ($1, $2); }       # host:port
+        elsif ($e =~ /^(\S+)$/)          { ($h, $p) = ($1, '4420'); }   # bare host
+        else                             { next; }
         push @eps, [$h, $p];
     }
     return @eps;
+}
+
+# Read a single trimmed line from a sysfs file, or undef if unreadable.
+sub _read_sysfs {
+    my ($f) = @_;
+    open(my $fh, '<', $f) or return undef;
+    my $v = <$fh>;
+    close($fh);
+    return undef unless defined $v;
+    chomp $v;
+    return $v;
+}
+
+# host:port endpoints already connected as paths for this subsystem NQN, so
+# activate_volume only connects the ones that are missing (and avoids nvme-cli
+# "already connected" errors). Keyed from each controller's sysfs address.
+sub _connected_endpoints {
+    my ($subsys_nqn) = @_;
+    my %seen;
+    return \%seen unless -d '/sys/class/nvme';
+    opendir(my $dh, '/sys/class/nvme') or return \%seen;
+    for my $ctl (readdir $dh) {
+        next unless $ctl =~ /^(nvme\d+)$/;
+        my $safe = $1;
+        my $nqn = _read_sysfs("/sys/class/nvme/$safe/subsysnqn");
+        next unless defined $nqn && $nqn eq $subsys_nqn;
+        my $addr = _read_sysfs("/sys/class/nvme/$safe/address") // '';
+        $seen{"$1:$2"} = 1 if $addr =~ /traddr=([^,\s]+).*?trsvcid=(\d+)/;
+    }
+    closedir($dh);
+    return \%seen;
 }
 
 sub _is_connected {
@@ -543,34 +582,37 @@ sub activate_volume {
     my $vol  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
     my $nsid = $vol->{nsid} or die "Cannot determine NSID for volume $uuid\n";
 
-    # Connect to the subsystem if not already connected. lb_nvme_host may be a
-    # comma-separated list of host:port endpoints; connect to every one so that
-    # on a multi-node (ANA) cluster the volume's optimized path is always among
-    # the established paths — a single connection can land on a non-optimized
-    # path and the namespace then never becomes accessible. Each endpoint is a
-    # separate NVMe-oF path; native NVMe multipath presents them as one device.
-    unless (_is_connected($subsys_nqn)) {
-        for my $ep (_nvme_endpoints($scfg->{lb_nvme_host})) {
-            my ($nvme_host, $nvme_port) = @$ep;
-            eval {
-                run_command(['nvme', 'connect',
-                    '-t', 'tcp',
-                    '-a', $nvme_host,
-                    '-s', $nvme_port,
-                    '-n', $subsys_nqn,
-                    '--keep-alive-tmo=30',
-                    '--reconnect-delay=10',
-                    '--ctrl-loss-tmo=-1',
-                ]);
-            };
-            warn "Lightbits: nvme connect to $nvme_host:$nvme_port failed: $@\n" if $@;
-        }
+    # Connect every configured endpoint that isn't already a path for this
+    # subsystem. lb_nvme_host may be a comma-separated host:port list; connecting
+    # to all data nodes ensures the volume's ANA-optimized path is present on a
+    # multi-node cluster (a single connection can land on a non-optimized path,
+    # leaving the namespace inaccessible) and gives redundancy for node failover.
+    # We gate per endpoint, not per subsystem, so a path that failed to connect
+    # the first time is retried on a later activation instead of leaving the
+    # volume permanently single-path. Native NVMe multipath presents the paths
+    # as one device.
+    my $connected = _connected_endpoints($subsys_nqn);
+    for my $ep (_nvme_endpoints($scfg->{lb_nvme_host})) {
+        my ($nvme_host, $nvme_port) = @$ep;
+        next if $connected->{"$nvme_host:$nvme_port"};
+        eval {
+            run_command(['nvme', 'connect',
+                '-t', 'tcp',
+                '-a', $nvme_host,
+                '-s', $nvme_port,
+                '-n', $subsys_nqn,
+                '--keep-alive-tmo=30',
+                '--reconnect-delay=10',
+                '--ctrl-loss-tmo=-1',
+            ]);
+        };
+        warn "Lightbits: nvme connect to $nvme_host:$nvme_port failed: $@\n" if $@;
+    }
 
-        # Wait for at least one path/namespace to come up.
-        for my $attempt (1..30) {
-            last if _is_connected($subsys_nqn);
-            sleep 1;
-        }
+    # Wait for a path to the subsystem to come up.
+    for my $attempt (1..30) {
+        last if _is_connected($subsys_nqn);
+        sleep 1;
     }
 
     # Find the block device for this volume's NSID
@@ -588,6 +630,24 @@ sub activate_volume {
     return 1;
 }
 
+# True if any volume of ANY storage on this host still maps the given subsystem
+# NQN (via a /dev/lightbits/<storeid>/<uuid> symlink). Used to decide, from local
+# state only, whether the subsystem may be disconnected.
+sub _nqn_still_in_use {
+    my ($subsys_nqn) = @_;
+    for my $l (glob("$SYMLINK_DIR/*/*")) {
+        next unless -l $l;
+        my $dev = readlink($l) or next;
+        next unless $dev =~ m{/(nvme\d+n\d+)$};
+        my $ns = $1;
+        my $f = "$SYS_BLOCK/$ns/device/subsysnqn";
+        $f = "$SYS_BLOCK/$ns/subsysnqn" unless -f $f;
+        my $nqn = _read_sysfs($f);
+        return 1 if defined $nqn && $nqn eq $subsys_nqn;
+    }
+    return 0;
+}
+
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
@@ -596,12 +656,12 @@ sub deactivate_volume {
 
     unlink $link if -l $link;
 
-    # Only disconnect if no other volumes from this storage are still active
-    my $still_active = grep { -l "$SYMLINK_DIR/$storeid/$_" }
-                       map  { $_->{UUID} }
-                       @{(_api($scfg, 'GET', "/api/v2/volumes?projectName=" . _project($scfg))->{volumes} // [])};
-
-    unless ($still_active) {
+    # Disconnect the subsystem only when no volume of ANY storage on this host
+    # still maps it — checked from local symlinks, not the API. `nvme disconnect`
+    # is subsystem-wide (drops every path/controller for the NQN), so a per-storid
+    # or API-derived check could tear down paths still in use by another storage
+    # that shares the same cluster, or fire on a transient API error.
+    unless (_nqn_still_in_use($subsys_nqn)) {
         run_command(['nvme', 'disconnect', '-n', $subsys_nqn])
             if _is_connected($subsys_nqn);
     }

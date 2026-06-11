@@ -18,16 +18,18 @@ sub eps { return PVE::Storage::Custom::LightbitsPlugin::_nvme_endpoints(@_) }
 
 is_deeply( [ eps('10.0.0.1:4420') ], [ ['10.0.0.1','4420'] ],
     'single host:port' );
-is_deeply( [ eps('10.19.38.4:4420,10.19.38.19:4420,10.19.38.23:4420') ],
-    [ ['10.19.38.4','4420'], ['10.19.38.19','4420'], ['10.19.38.23','4420'] ],
+is_deeply( [ eps('10.0.0.1:4420,10.0.0.2:4420,10.0.0.3:4420') ],
+    [ ['10.0.0.1','4420'], ['10.0.0.2','4420'], ['10.0.0.3','4420'] ],
     'three comma-separated endpoints (multipath)' );
 is_deeply( [ eps(' 10.0.0.1:4420 , 10.0.0.2:4420 ') ],
     [ ['10.0.0.1','4420'], ['10.0.0.2','4420'] ],
     'whitespace around entries is trimmed' );
 is_deeply( [ eps('myhost') ], [ ['myhost','4420'] ],
     'no :port defaults to 4420' );
-is_deeply( [ eps('[fd00::1]:4420') ], [ ['[fd00::1]','4420'] ],
-    'rightmost colon -> bracketed IPv6 literal parses' );
+is_deeply( [ eps('[fd00::1]:4420') ], [ ['fd00::1','4420'] ],
+    'bracketed IPv6 literal: brackets stripped, port parsed' );
+is_deeply( [ eps('[fd00::1]') ], [ ['fd00::1','4420'] ],
+    'bracketed IPv6 literal without port -> default 4420' );
 is_deeply( [ eps('') ], [], 'empty string -> no endpoints' );
 is_deeply( [ eps(undef) ], [], 'undef -> no endpoints' );
 is_deeply( [ eps('a:4420,,  ,b:4420') ], [ ['a','4420'], ['b','4420'] ],
