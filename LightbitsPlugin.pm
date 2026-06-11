@@ -59,6 +59,61 @@ sub _host_nqn {
     return $nqn;
 }
 
+# Parse lb_nvme_host — one or more comma-separated "host:port" endpoints — into a
+# list of [host, port] pairs. Whitespace around entries is trimmed, an entry with
+# no ":port" defaults to 4420, and the *rightmost* ":<port>" is used so bracketed
+# IPv6 literals (e.g. "[fd00::1]:4420") parse correctly.
+sub _nvme_endpoints {
+    my ($spec) = @_;
+    my @eps;
+    for my $e (split /,/, ($spec // '')) {
+        $e =~ s/^\s+|\s+$//g;
+        next unless length $e;
+        # Capture (untaints under perl -T) and strip IPv6 brackets so the bare
+        # address is passed to `nvme -a`. IPv6 literals must be bracketed to be
+        # distinguishable from host:port.
+        my ($h, $p);
+        if    ($e =~ /^\[(.+)\]:(\d+)$/) { ($h, $p) = ($1, $2); }       # [IPv6]:port
+        elsif ($e =~ /^\[(.+)\]$/)       { ($h, $p) = ($1, '4420'); }   # [IPv6]
+        elsif ($e =~ /^(.+):(\d+)$/)     { ($h, $p) = ($1, $2); }       # host:port
+        elsif ($e =~ /^(\S+)$/)          { ($h, $p) = ($1, '4420'); }   # bare host
+        else                             { next; }
+        push @eps, [$h, $p];
+    }
+    return @eps;
+}
+
+# Read a single trimmed line from a sysfs file, or undef if unreadable.
+sub _read_sysfs {
+    my ($f) = @_;
+    open(my $fh, '<', $f) or return undef;
+    my $v = <$fh>;
+    close($fh);
+    return undef unless defined $v;
+    chomp $v;
+    return $v;
+}
+
+# host:port endpoints already connected as paths for this subsystem NQN, so
+# activate_volume only connects the ones that are missing (and avoids nvme-cli
+# "already connected" errors). Keyed from each controller's sysfs address.
+sub _connected_endpoints {
+    my ($subsys_nqn) = @_;
+    my %seen;
+    return \%seen unless -d '/sys/class/nvme';
+    opendir(my $dh, '/sys/class/nvme') or return \%seen;
+    for my $ctl (readdir $dh) {
+        next unless $ctl =~ /^(nvme\d+)$/;
+        my $safe = $1;
+        my $nqn = _read_sysfs("/sys/class/nvme/$safe/subsysnqn");
+        next unless defined $nqn && $nqn eq $subsys_nqn;
+        my $addr = _read_sysfs("/sys/class/nvme/$safe/address") // '';
+        $seen{"$1:$2"} = 1 if $addr =~ /traddr=([^,\s]+).*?trsvcid=(\d+)/;
+    }
+    closedir($dh);
+    return \%seen;
+}
+
 sub _is_connected {
     my ($subsys_nqn) = @_;
     return 0 unless -d '/sys/class/nvme';
@@ -74,37 +129,57 @@ sub _is_connected {
     return 0;
 }
 
+# Sysfs/dev roots and the block-device test, factored out so they can be
+# overridden in unit tests (the function otherwise reads the real /sys and /dev).
+our $SYS_BLOCK = '/sys/block';
+our $DEV_DIR   = '/dev';
+sub _dev_path { return "$DEV_DIR/$_[0]"; }
+sub _is_block { return -b $_[0]; }
+
+# Resolve the namespace HEAD block device for a (subsystem NQN, nsid) pair.
+#
+# Under native NVMe multipath (CONFIG_NVME_MULTIPATH=Y, the default), each
+# namespace appears twice in /sys/block: one entry per controller path,
+# "nvme<C>c<P>n<N>", which has NO /dev node; and the multipath HEAD,
+# "nvme<C>n<N>", which does. QEMU attaches the head, and the head is what
+# survives a path failover — so we must always return it, never a per-path
+# device. (The previous /sys/class/nvme walk built the device name from a path
+# controller's number, which only equals the head when there is a single path;
+# with multiple paths it produced a name with no /dev node and failed.)
+#
+# We therefore enumerate /sys/block, consider only head entries (no "c<P>"
+# segment), and match the namespace by its subsystem NQN and nsid.
 sub _find_nvme_device {
     my ($subsys_nqn, $nsid) = @_;
-    return undef unless -d '/sys/class/nvme';
-    opendir(my $dh, '/sys/class/nvme') or return undef;
-    for my $ctl (readdir $dh) {
-        # Capture into $1 to untaint (taint mode: readdir output is tainted)
-        next unless $ctl =~ /^(nvme\d+)$/;
-        my $safe_ctl = $1;
-        my $nqn_f = "/sys/class/nvme/$safe_ctl/subsysnqn";
+    return undef unless -d $SYS_BLOCK;
+    opendir(my $dh, $SYS_BLOCK) or return undef;
+    for my $entry (readdir $dh) {
+        # Head namespace only ("nvme<C>n<N>"); the per-path "nvme<C>c<P>n<N>"
+        # form is skipped. Capture to untaint (the CI runs perl -T).
+        next unless $entry =~ /^(nvme\d+n\d+)$/;
+        my $ns = $1;
+
+        # The namespace's subsystem NQN. The head's "device" link points at the
+        # NVMe subsystem; fall back to the namespace dir for older kernels.
+        my $nqn_f = "$SYS_BLOCK/$ns/device/subsysnqn";
+        $nqn_f = "$SYS_BLOCK/$ns/subsysnqn" unless -f $nqn_f;
         next unless -f $nqn_f;
         open(my $fh, '<', $nqn_f) or next;
         chomp(my $nqn = <$fh>);
+        close($fh);
         next unless $nqn eq $subsys_nqn;
-        # find namespace by nsid via sysfs (kernel names namespaces sequentially,
-        # independent of the actual namespace ID)
-        opendir(my $ndh, "/sys/class/nvme/$safe_ctl") or next;
-        for my $ns (readdir $ndh) {
-            # Capture ns_num via regex to untaint it
-            my $ns_num;
-            if    ($ns =~ /^${safe_ctl}c\d+n(\d+)$/) { $ns_num = $1 }
-            elsif ($ns =~ /^${safe_ctl}n(\d+)$/)      { $ns_num = $1 }
-            else                                       { next }
-            my $nsid_f = "/sys/class/nvme/$safe_ctl/$ns/nsid";
-            next unless -f $nsid_f;
-            open(my $nfh, '<', $nsid_f) or next;
-            chomp(my $found_nsid = <$nfh>);
-            next unless $found_nsid == $nsid;
-            my $dev = "/dev/${safe_ctl}n${ns_num}";
-            return $dev if -b $dev;
-        }
+
+        my $nsid_f = "$SYS_BLOCK/$ns/nsid";
+        next unless -f $nsid_f;
+        open(my $nfh, '<', $nsid_f) or next;
+        chomp(my $found_nsid = <$nfh>);
+        close($nfh);
+        next unless $found_nsid == $nsid;
+
+        my $dev = _dev_path($ns);
+        return $dev if _is_block($dev);
     }
+    closedir($dh);
     return undef;
 }
 
@@ -507,21 +582,37 @@ sub activate_volume {
     my $vol  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
     my $nsid = $vol->{nsid} or die "Cannot determine NSID for volume $uuid\n";
 
-    # Connect to subsystem if not already connected
-    unless (_is_connected($subsys_nqn)) {
-        my ($nvme_host, $nvme_port) = split(/:/, $scfg->{lb_nvme_host});
-        run_command(['nvme', 'connect',
-            '-t', 'tcp',
-            '-a', $nvme_host,
-            '-s', $nvme_port // '4420',
-            '-n', $subsys_nqn,
-        ]);
+    # Connect every configured endpoint that isn't already a path for this
+    # subsystem. lb_nvme_host may be a comma-separated host:port list; connecting
+    # to all data nodes ensures the volume's ANA-optimized path is present on a
+    # multi-node cluster (a single connection can land on a non-optimized path,
+    # leaving the namespace inaccessible) and gives redundancy for node failover.
+    # We gate per endpoint, not per subsystem, so a path that failed to connect
+    # the first time is retried on a later activation instead of leaving the
+    # volume permanently single-path. Native NVMe multipath presents the paths
+    # as one device.
+    my $connected = _connected_endpoints($subsys_nqn);
+    for my $ep (_nvme_endpoints($scfg->{lb_nvme_host})) {
+        my ($nvme_host, $nvme_port) = @$ep;
+        next if $connected->{"$nvme_host:$nvme_port"};
+        eval {
+            run_command(['nvme', 'connect',
+                '-t', 'tcp',
+                '-a', $nvme_host,
+                '-s', $nvme_port,
+                '-n', $subsys_nqn,
+                '--keep-alive-tmo=30',
+                '--reconnect-delay=10',
+                '--ctrl-loss-tmo=-1',
+            ]);
+        };
+        warn "Lightbits: nvme connect to $nvme_host:$nvme_port failed: $@\n" if $@;
+    }
 
-        # Wait for devices to appear
-        for my $attempt (1..30) {
-            last if _is_connected($subsys_nqn);
-            sleep 1;
-        }
+    # Wait for a path to the subsystem to come up.
+    for my $attempt (1..30) {
+        last if _is_connected($subsys_nqn);
+        sleep 1;
     }
 
     # Find the block device for this volume's NSID
@@ -539,6 +630,24 @@ sub activate_volume {
     return 1;
 }
 
+# True if any volume of ANY storage on this host still maps the given subsystem
+# NQN (via a /dev/lightbits/<storeid>/<uuid> symlink). Used to decide, from local
+# state only, whether the subsystem may be disconnected.
+sub _nqn_still_in_use {
+    my ($subsys_nqn) = @_;
+    for my $l (glob("$SYMLINK_DIR/*/*")) {
+        next unless -l $l;
+        my $dev = readlink($l) or next;
+        next unless $dev =~ m{/(nvme\d+n\d+)$};
+        my $ns = $1;
+        my $f = "$SYS_BLOCK/$ns/device/subsysnqn";
+        $f = "$SYS_BLOCK/$ns/subsysnqn" unless -f $f;
+        my $nqn = _read_sysfs($f);
+        return 1 if defined $nqn && $nqn eq $subsys_nqn;
+    }
+    return 0;
+}
+
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
@@ -547,12 +656,12 @@ sub deactivate_volume {
 
     unlink $link if -l $link;
 
-    # Only disconnect if no other volumes from this storage are still active
-    my $still_active = grep { -l "$SYMLINK_DIR/$storeid/$_" }
-                       map  { $_->{UUID} }
-                       @{(_api($scfg, 'GET', "/api/v2/volumes?projectName=" . _project($scfg))->{volumes} // [])};
-
-    unless ($still_active) {
+    # Disconnect the subsystem only when no volume of ANY storage on this host
+    # still maps it — checked from local symlinks, not the API. `nvme disconnect`
+    # is subsystem-wide (drops every path/controller for the NQN), so a per-storid
+    # or API-derived check could tear down paths still in use by another storage
+    # that shares the same cluster, or fire on a transient API error.
+    unless (_nqn_still_in_use($subsys_nqn)) {
         run_command(['nvme', 'disconnect', '-n', $subsys_nqn])
             if _is_connected($subsys_nqn);
     }
