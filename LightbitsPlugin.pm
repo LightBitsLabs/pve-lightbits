@@ -207,6 +207,14 @@ sub properties {
                 . "hypervisor's volumes (default: hostname).",
             type        => 'string',
         },
+        lb_replica_count => {
+            description => "Number of replicas to create each volume with. Must be "
+                . "supported by the cluster (a single-node cluster requires 1).",
+            type        => 'integer',
+            minimum     => 1,
+            maximum     => 3,
+            default     => 1,
+        },
     };
 }
 
@@ -218,6 +226,7 @@ sub options {
         lb_nvme_host  => { fixed    => 1 },
         lb_subsys_nqn => { fixed => 1, optional => 1 },
         lb_owner_id   => { optional => 1 },
+        lb_replica_count => { optional => 1 },
         content       => { optional => 1 },
         shared        => { optional => 1 },
         disable       => { optional => 1 },
@@ -403,11 +412,14 @@ sub alloc_image {
     my $index    = _next_disk_index($scfg, $vmid);
     my $owner_id = _owner_id($scfg);
     my $vol_name = "vm-${vmid}-${guid}-disk-${index}";
+    # int() so the value (a string when read back from storage.cfg) serialises
+    # as a JSON number, matching the previous hardcoded literal.
+    my $replica_count = int($scfg->{lb_replica_count} // 1);
 
     my $body = {
         name         => $vol_name,
         size         => "$bytes",
-        replicaCount => 1,
+        replicaCount => $replica_count,
         projectName  => $project,
         acl          => { values => [$host_nqn] },
         labels       => [
