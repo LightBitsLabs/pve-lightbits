@@ -436,6 +436,7 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 
 - Single Lightbits cluster per storage entry
 - Full volume lifecycle for VM disks: create, attach, detach, delete
+- Volume resize (grow), online and offline
 - Per-VM ownership labels and node-aware filtering (multi-hypervisor safety)
 - NVMe-oF TCP transport
 - Storage capacity reporting
@@ -445,7 +446,6 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 On the horizon:
 
 - Snapshots and clones
-- Volume resize
 - Multi-tenancy and multi-cluster support
 - Configurable replica count and multi-path NVMe-oF
 - Live migration support
