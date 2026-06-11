@@ -50,6 +50,15 @@ ok( !$ok, 'alloc_image dies when the volume enters a Failed state' );
 like( $@, qr/\Q$UUID\E/,        'failure error names the volume UUID' );
 like( $@, qr/state 'Failed'/,   'failure error reports the Failed state' );
 
+# ── other terminal states (Deleting/Deleted) also die fast ─────────────────────
+for my $term ('Deleting', 'Deleted') {
+    $get_state = $term;
+    $ok = eval { $class->alloc_image('lb-storage', $scfg, 100, 'raw', undef, 1048576); 1 };
+    ok( !$ok, "alloc_image dies when the volume enters a $term state" );
+    like( $@, qr/\Q$UUID\E/,         "$term failure error names the volume UUID" );
+    like( $@, qr/state '\Q$term\E'/, "$term failure error reports the $term state" );
+}
+
 # ── never converges: stuck Creating → die on timeout ───────────────────────────
 $get_state = 'Creating';
 $ok = eval { $class->alloc_image('lb-storage', $scfg, 100, 'raw', undef, 1048576); 1 };
