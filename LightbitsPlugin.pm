@@ -568,14 +568,23 @@ sub volume_resize {
     };
     _api($scfg, 'PUT', "/api/v2/volumes/$uuid?projectName=$project", $body);
 
-    # Wait for Lightbits to apply the new size across all replicas.
+    # Wait for Lightbits to apply the new size across all replicas. Keep the last
+    # observed size/state so we can verify success after the loop rather than
+    # assuming it on timeout.
+    my ($cur, $state) = (0, '');
     for my $attempt (1..60) {
-        my $vol   = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
-        my $cur   = int($vol->{size} // 0);
-        my $state = $vol->{state} // '';
+        my $vol = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+        $cur    = int($vol->{size} // 0);
+        $state  = $vol->{state} // '';
         last if $cur >= $bytes && $state eq 'Available';
         sleep 2;
     }
+
+    # Fail fast if the resize never converged: returning $bytes here would make
+    # PVE (and the caller's block_resize) assume a size the volume doesn't have.
+    die "Lightbits volume $uuid resize did not complete: expected >= $bytes bytes "
+        . "in state 'Available', last saw $cur bytes in state '$state'\n"
+        if $cur < $bytes || $state ne 'Available';
 
     # Refresh the kernel's view of the grown namespace. In practice the NVMe
     # controller already updates the namespace capacity on its own, via an

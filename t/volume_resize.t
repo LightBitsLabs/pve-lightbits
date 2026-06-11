@@ -13,6 +13,9 @@ use warnings;
 use Test::More;
 use FindBin;
 
+# Neutralise the resize poll's sleep so the timeout/failure path runs instantly.
+BEGIN { *CORE::GLOBAL::sleep = sub { }; }
+
 use lib "$FindBin::RealBin/stubs";
 require "$FindBin::RealBin/../LightbitsPlugin.pm";
 
@@ -22,6 +25,7 @@ my $class = 'PVE::Storage::Custom::LightbitsPlugin';
 #    poll loop exits on the first attempt (no real sleeping). ─────────────────────
 my %put;          # captured PUT (method/path/body)
 my $reported = 0; # size the GET poll returns
+my $never    = 0; # when set, GET never reports success (drives the timeout path)
 no warnings 'redefine';
 *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
     my ($scfg, $method, $path, $body) = @_;
@@ -30,6 +34,7 @@ no warnings 'redefine';
         $reported = $body->{size};   # cluster now reports the new size
         return {};
     }
+    return { size => 0, state => 'Creating' } if $method eq 'GET' && $never;
     return { size => $reported, state => 'Available' } if $method eq 'GET';
     return {};
 };
@@ -64,5 +69,15 @@ for my $in (sort { $a <=> $b } keys %expect) {
 # ── resizes regardless of the running flag (network block storage) ──────────────
 $class->volume_resize($scfg, 'lb-storage', $volname, 8192, 1);
 is( $put{body}{size}, '8192', 'still issues the PUT when the guest is running' );
+
+# ── fails fast when the resize never converges (timeout) instead of reporting OK ─
+$never = 1;
+my $err = eval { $class->volume_resize($scfg, 'lb-storage', $volname, 4096, 0); 1 };
+ok( !$err, 'volume_resize dies when the volume never reaches the requested size/state' );
+like( $@, qr/\Q$UUID\E/,           'error names the volume UUID' );
+like( $@, qr/expected >= 4096/,    'error reports the expected size' );
+like( $@, qr/last saw 0 bytes/,    'error reports the last-seen size' );
+like( $@, qr/state 'Creating'/,    'error reports the last-seen state' );
+$never = 0;
 
 done_testing();
