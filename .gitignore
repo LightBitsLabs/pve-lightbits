@@ -6,3 +6,6 @@ test-config.sh
 # Local-only design notes and unreviewed landing-page draft
 docs/design/
 index.html
+
+# Claude Code local settings (may contain internal hostnames/IPs)
+.claude/
