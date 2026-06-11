@@ -66,7 +66,7 @@ The plugin has two communication paths to the Lightbits cluster:
 
 | Requirement | Notes |
 |---|---|
-| Proxmox VE **8.x** | Tested on 8.4. Earlier versions may work but are untested. |
+| Proxmox VE **9.x** | Tested on 9.2. Requires the PVE 9 storage API (`-blockdev`). |
 | `nvme-cli` package | Provides the `nvme` command used for connect/disconnect. Ubuntu/Debian: `apt-get install -y nvme-cli`. RHEL/Rocky: `dnf install -y nvme-cli`. |
 | `nvme_tcp` kernel module | Loaded automatically by nvme-cli on modern Proxmox kernels. |
 | Perl modules | `LWP::Protocol::https` and `JSON` - both included in stock Proxmox. |
@@ -477,7 +477,7 @@ pve-lightbits/
 
 | Component | Version |
 |---|---|
-| Proxmox VE | 8.4 (tested) |
+| Proxmox VE | 9.x (tested on 9.2) |
 | Lightbits LightOS | 3.x |
 | Perl | 5.36+ |
 | Linux kernel | 5.0+ (nvme_tcp module required) |

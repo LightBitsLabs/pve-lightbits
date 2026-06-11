@@ -124,8 +124,38 @@ sub _vol_uuid {
 
 # ── Plugin registration ───────────────────────────────────────────────────────
 
-sub api        { return 11; }
+# Highest storage APIVER whose contract this plugin satisfies. Bump as newer
+# Proxmox VE releases are validated. See the API changelog at
+# https://pve.proxmox.com/wiki/Storage_Plugin_Development
+my $TESTED_APIVER = 14;   # PVE 9.x: qemu_blockdev_options (12), get_identity (14)
+
+# Report the storage API version of the *running* host rather than a fixed
+# number, because the APIVER differs across PVE point releases and the loader
+# only accepts a plugin whose api() falls within [APIVER - APIAGE, APIVER]: a
+# value below APIVER (but inside the window) merely triggers the "older storage
+# API" warning, while a value below the window is rejected outright. So:
+#   - host APIVER <= our tested max: return it verbatim -> exact match, no warning.
+#   - host APIVER >  our tested max: return our tested max. This loads (with the
+#     deprecation warning) while the host is still within its backward-compat
+#     window, and is rejected by the loader once the host moves past it entirely.
+# Mirrors LINBIT's LINSTOR plugin. Falls back to our tested version if
+# PVE::Storage is somehow absent.
+sub api {
+    my $apiver = eval { PVE::Storage::APIVER() };
+    return $TESTED_APIVER if !defined $apiver;
+    return $apiver if $apiver <= $TESTED_APIVER;
+    return $TESTED_APIVER;
+}
+
 sub type       { return 'lightbits'; }
+
+# Stable identifier for the backing store (storage API 14). Two storage entries
+# pointing at the same LightOS cluster endpoint and project share an identity,
+# which lets PVE recognise the same backend across nodes.
+sub get_identity {
+    my ($class, $scfg, $storeid) = @_;
+    return "lightbits://$scfg->{lb_api_host}/" . _project($scfg);
+}
 
 sub parse_volname {
     my ($class, $volname) = @_;

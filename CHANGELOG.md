@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Initial release of the Lightbits Storage Plugin for Proxmox VE.
+- Initial release of the Lightbits Storage Plugin for Proxmox VE 9.x.
 - Installs into the official `PVE::Storage::Custom` third-party namespace, auto-loaded by Proxmox without patching PVE's own files.
+- Dynamic storage API version negotiation: `api()` reports the running host's `APIVER` (clamped to the validated maximum), so the plugin loads cleanly without the "older storage API" warning across Proxmox VE 9.x point releases. Implements `get_identity()` (storage API 14).
 - Full VM disk lifecycle via the Lightbits REST API: create, attach, detach, delete.
 - NVMe-oF TCP transport for block-device access (`nvme-tcp`).
 - Storage capacity reporting in the Proxmox dashboard.
