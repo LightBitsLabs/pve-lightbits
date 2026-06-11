@@ -9,6 +9,7 @@ use strict;
 use warnings;
 use Test::More;
 use FindBin;
+use JSON qw(encode_json);
 
 use lib "$FindBin::RealBin/stubs";
 require "$FindBin::RealBin/../LightbitsPlugin.pm";
@@ -38,5 +39,12 @@ for my $rc (1, 2, 3) {
         100, 'raw', undef, 1048576);
     is( $posted->{replicaCount}, $rc, "lb_replica_count $rc is sent as replicaCount $rc" );
 }
+
+# ── a string value (as parsed from storage.cfg) serialises as a JSON number ─────
+$class->alloc_image('lb-storage', { lb_project => 'default', lb_replica_count => '2' },
+    100, 'raw', undef, 1048576);
+is( $posted->{replicaCount}, 2, 'string lb_replica_count is accepted' );
+like( encode_json({ replicaCount => $posted->{replicaCount} }), qr/"replicaCount":2(?!")/,
+    'replicaCount encodes as a JSON number, not a quoted string' );
 
 done_testing();

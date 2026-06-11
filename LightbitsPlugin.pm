@@ -209,11 +209,11 @@ sub properties {
         },
         lb_replica_count => {
             description => "Number of replicas to create each volume with. Must be "
-                . "supported by the cluster (a single-node cluster requires 1). "
-                . "Default: 1.",
+                . "supported by the cluster (a single-node cluster requires 1).",
             type        => 'integer',
             minimum     => 1,
             maximum     => 3,
+            default     => 1,
         },
     };
 }
@@ -412,7 +412,9 @@ sub alloc_image {
     my $index    = _next_disk_index($scfg, $vmid);
     my $owner_id = _owner_id($scfg);
     my $vol_name = "vm-${vmid}-${guid}-disk-${index}";
-    my $replica_count = $scfg->{lb_replica_count} // 1;
+    # int() so the value (a string when read back from storage.cfg) serialises
+    # as a JSON number, matching the previous hardcoded literal.
+    my $replica_count = int($scfg->{lb_replica_count} // 1);
 
     my $body = {
         name         => $vol_name,
