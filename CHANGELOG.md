@@ -26,3 +26,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `alloc_image` now fails fast with a clear error if a new volume reports a terminal `Failed` state or never becomes `Available`, instead of returning a volid for an unusable volume (which previously surfaced later as a confusing "Cannot determine NSID" error at attach time).
+- NVMe device discovery (`_find_nvme_device`) now resolves the multipath **head** namespace device (`/dev/nvme<C>n<N>`) instead of building a name from a path controller. Under native NVMe multipath (the kernel default) a namespace also appears as a per-path `nvme<C>c<P>n<N>` device with no `/dev` node; the previous logic could return that path-derived name and fail to find the device when more than one path exists. Volume attach is now multipath-safe.

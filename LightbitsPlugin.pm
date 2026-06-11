@@ -74,37 +74,57 @@ sub _is_connected {
     return 0;
 }
 
+# Sysfs/dev roots and the block-device test, factored out so they can be
+# overridden in unit tests (the function otherwise reads the real /sys and /dev).
+our $SYS_BLOCK = '/sys/block';
+our $DEV_DIR   = '/dev';
+sub _dev_path { return "$DEV_DIR/$_[0]"; }
+sub _is_block { return -b $_[0]; }
+
+# Resolve the namespace HEAD block device for a (subsystem NQN, nsid) pair.
+#
+# Under native NVMe multipath (CONFIG_NVME_MULTIPATH=Y, the default), each
+# namespace appears twice in /sys/block: one entry per controller path,
+# "nvme<C>c<P>n<N>", which has NO /dev node; and the multipath HEAD,
+# "nvme<C>n<N>", which does. QEMU attaches the head, and the head is what
+# survives a path failover — so we must always return it, never a per-path
+# device. (The previous /sys/class/nvme walk built the device name from a path
+# controller's number, which only equals the head when there is a single path;
+# with multiple paths it produced a name with no /dev node and failed.)
+#
+# We therefore enumerate /sys/block, consider only head entries (no "c<P>"
+# segment), and match the namespace by its subsystem NQN and nsid.
 sub _find_nvme_device {
     my ($subsys_nqn, $nsid) = @_;
-    return undef unless -d '/sys/class/nvme';
-    opendir(my $dh, '/sys/class/nvme') or return undef;
-    for my $ctl (readdir $dh) {
-        # Capture into $1 to untaint (taint mode: readdir output is tainted)
-        next unless $ctl =~ /^(nvme\d+)$/;
-        my $safe_ctl = $1;
-        my $nqn_f = "/sys/class/nvme/$safe_ctl/subsysnqn";
+    return undef unless -d $SYS_BLOCK;
+    opendir(my $dh, $SYS_BLOCK) or return undef;
+    for my $entry (readdir $dh) {
+        # Head namespace only ("nvme<C>n<N>"); the per-path "nvme<C>c<P>n<N>"
+        # form is skipped. Capture to untaint (the CI runs perl -T).
+        next unless $entry =~ /^(nvme\d+n\d+)$/;
+        my $ns = $1;
+
+        # The namespace's subsystem NQN. The head's "device" link points at the
+        # NVMe subsystem; fall back to the namespace dir for older kernels.
+        my $nqn_f = "$SYS_BLOCK/$ns/device/subsysnqn";
+        $nqn_f = "$SYS_BLOCK/$ns/subsysnqn" unless -f $nqn_f;
         next unless -f $nqn_f;
         open(my $fh, '<', $nqn_f) or next;
         chomp(my $nqn = <$fh>);
+        close($fh);
         next unless $nqn eq $subsys_nqn;
-        # find namespace by nsid via sysfs (kernel names namespaces sequentially,
-        # independent of the actual namespace ID)
-        opendir(my $ndh, "/sys/class/nvme/$safe_ctl") or next;
-        for my $ns (readdir $ndh) {
-            # Capture ns_num via regex to untaint it
-            my $ns_num;
-            if    ($ns =~ /^${safe_ctl}c\d+n(\d+)$/) { $ns_num = $1 }
-            elsif ($ns =~ /^${safe_ctl}n(\d+)$/)      { $ns_num = $1 }
-            else                                       { next }
-            my $nsid_f = "/sys/class/nvme/$safe_ctl/$ns/nsid";
-            next unless -f $nsid_f;
-            open(my $nfh, '<', $nsid_f) or next;
-            chomp(my $found_nsid = <$nfh>);
-            next unless $found_nsid == $nsid;
-            my $dev = "/dev/${safe_ctl}n${ns_num}";
-            return $dev if -b $dev;
-        }
+
+        my $nsid_f = "$SYS_BLOCK/$ns/nsid";
+        next unless -f $nsid_f;
+        open(my $nfh, '<', $nsid_f) or next;
+        chomp(my $found_nsid = <$nfh>);
+        close($nfh);
+        next unless $found_nsid == $nsid;
+
+        my $dev = _dev_path($ns);
+        return $dev if _is_block($dev);
     }
+    closedir($dh);
     return undef;
 }
 
