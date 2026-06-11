@@ -59,6 +59,22 @@ sub _host_nqn {
     return $nqn;
 }
 
+# Parse lb_nvme_host — one or more comma-separated "host:port" endpoints — into a
+# list of [host, port] pairs. Whitespace around entries is trimmed, an entry with
+# no ":port" defaults to 4420, and the *rightmost* ":<port>" is used so bracketed
+# IPv6 literals (e.g. "[fd00::1]:4420") parse correctly.
+sub _nvme_endpoints {
+    my ($spec) = @_;
+    my @eps;
+    for my $e (split /,/, ($spec // '')) {
+        $e =~ s/^\s+|\s+$//g;
+        next unless length $e;
+        my ($h, $p) = $e =~ /^(.+):(\d+)$/ ? ($1, $2) : ($e, '4420');
+        push @eps, [$h, $p];
+    }
+    return @eps;
+}
+
 sub _is_connected {
     my ($subsys_nqn) = @_;
     return 0 unless -d '/sys/class/nvme';
@@ -527,17 +543,30 @@ sub activate_volume {
     my $vol  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
     my $nsid = $vol->{nsid} or die "Cannot determine NSID for volume $uuid\n";
 
-    # Connect to subsystem if not already connected
+    # Connect to the subsystem if not already connected. lb_nvme_host may be a
+    # comma-separated list of host:port endpoints; connect to every one so that
+    # on a multi-node (ANA) cluster the volume's optimized path is always among
+    # the established paths — a single connection can land on a non-optimized
+    # path and the namespace then never becomes accessible. Each endpoint is a
+    # separate NVMe-oF path; native NVMe multipath presents them as one device.
     unless (_is_connected($subsys_nqn)) {
-        my ($nvme_host, $nvme_port) = split(/:/, $scfg->{lb_nvme_host});
-        run_command(['nvme', 'connect',
-            '-t', 'tcp',
-            '-a', $nvme_host,
-            '-s', $nvme_port // '4420',
-            '-n', $subsys_nqn,
-        ]);
+        for my $ep (_nvme_endpoints($scfg->{lb_nvme_host})) {
+            my ($nvme_host, $nvme_port) = @$ep;
+            eval {
+                run_command(['nvme', 'connect',
+                    '-t', 'tcp',
+                    '-a', $nvme_host,
+                    '-s', $nvme_port,
+                    '-n', $subsys_nqn,
+                    '--keep-alive-tmo=30',
+                    '--reconnect-delay=10',
+                    '--ctrl-loss-tmo=-1',
+                ]);
+            };
+            warn "Lightbits: nvme connect to $nvme_host:$nvme_port failed: $@\n" if $@;
+        }
 
-        # Wait for devices to appear
+        # Wait for at least one path/namespace to come up.
         for my $attempt (1..30) {
             last if _is_connected($subsys_nqn);
             sleep 1;
