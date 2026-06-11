@@ -38,12 +38,16 @@ for my $v (2, 11, 12, 13, 14) {
     is( $class->api(), $v, "api() returns host APIVER $v verbatim when <= tested ($TESTED)" );
 }
 
-# ── api(): host newer than we tested → claim our tested max (loads, warns) ──────
+# ── api(): host newer than we tested → claim our tested max ─────────────────────
+# api() returns our tested max in both cases; what differs is what the PVE loader
+# then does, since it only accepts api() within [APIVER - APIAGE, APIVER]:
+#   host one ahead (window min 15-5=10 <= 14): loads with the "older API" warning
+#   host far ahead (window min 99-2=97  >  14): rejected by the loader as too old
 $host_apiver = 15; $host_apiage = 5;
-is( $class->api(), $TESTED, 'api() caps at tested version when host is one ahead' );
+is( $class->api(), $TESTED, 'api() returns tested max when host is one ahead (loader loads it, with warning)' );
 
 $host_apiver = 99; $host_apiage = 2;
-is( $class->api(), $TESTED, 'api() caps at tested version when host is far ahead' );
+is( $class->api(), $TESTED, 'api() returns tested max when host is far ahead (loader rejects it as too old)' );
 
 # ── api(): PVE::Storage unavailable → fall back to tested version ───────────────
 $break = 1;

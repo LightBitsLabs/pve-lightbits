@@ -130,21 +130,20 @@ sub _vol_uuid {
 my $TESTED_APIVER = 14;   # PVE 9.x: qemu_blockdev_options (12), get_identity (14)
 
 # Report the storage API version of the *running* host rather than a fixed
-# number. The loader refuses to load a plugin whose api() exceeds the host's
-# APIVER and warns when it is lower, and the APIVER differs across PVE point
-# releases — so a static value cannot be both silent and loadable everywhere.
-# Returning the host's own version (clamped to what we have validated) keeps us
-# silent and compatible across the whole 9.x line. Mirrors LINBIT's LINSTOR
-# plugin. Falls back to our tested version if PVE::Storage is somehow absent.
+# number, because the APIVER differs across PVE point releases and the loader
+# only accepts a plugin whose api() falls within [APIVER - APIAGE, APIVER]: a
+# value below APIVER (but inside the window) merely triggers the "older storage
+# API" warning, while a value below the window is rejected outright. So:
+#   - host APIVER <= our tested max: return it verbatim -> exact match, no warning.
+#   - host APIVER >  our tested max: return our tested max. This loads (with the
+#     deprecation warning) while the host is still within its backward-compat
+#     window, and is rejected by the loader once the host moves past it entirely.
+# Mirrors LINBIT's LINSTOR plugin. Falls back to our tested version if
+# PVE::Storage is somehow absent.
 sub api {
     my $apiver = eval { PVE::Storage::APIVER() };
-    my $apiage = eval { PVE::Storage::APIAGE() };
-    return $TESTED_APIVER if !defined $apiver || !defined $apiage;
-    # Host within (or below) our tested range: match it exactly -> no warning.
+    return $TESTED_APIVER if !defined $apiver;
     return $apiver if $apiver <= $TESTED_APIVER;
-    # Host is newer than we have tested: claim our max while it is still inside
-    # the host's backward-compatibility window (else the loader would reject us).
-    return $TESTED_APIVER if $apiver - $apiage <= $TESTED_APIVER;
     return $TESTED_APIVER;
 }
 
