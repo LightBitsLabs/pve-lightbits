@@ -20,3 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stable per-volume symlinks under `/dev/lightbits/<storeid>/<uuid>`.
 - `install.sh` / `uninstall.sh` scripts for each Proxmox node.
 - CI workflow: Perl syntax check, taint-mode check, unit tests via `prove`, and `shellcheck` on installer scripts.
+
+### Changed
+
+- `alloc_image` now fails fast with a clear error if a new volume reports a terminal `Failed` state or never becomes `Available`, instead of returning a volid for an unusable volume (which previously surfaced later as a confusing "Cannot determine NSID" error at attach time).
