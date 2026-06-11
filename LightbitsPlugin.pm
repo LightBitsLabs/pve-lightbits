@@ -420,12 +420,23 @@ sub alloc_image {
     my $result = _api($scfg, 'POST', '/api/v2/volumes', $body);
     my $uuid   = $result->{UUID} or die "Lightbits volume creation returned no UUID\n";
 
-    # Wait for volume to become Available
+    # Wait for the volume to become Available, failing fast on a terminal cluster
+    # failure (or if it never converges). Otherwise a Failed volume would be
+    # returned as if it were created and the problem would only surface later —
+    # cryptically — when activate_volume can't find its NSID.
+    my $state = '';
     for my $attempt (1..30) {
-        my $v = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
-        last if ($v->{state} // '') eq 'Available';
+        my $v  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+        $state = $v->{state} // '';
+        last if $state eq 'Available';
+        die "Lightbits volume $vol_name ($uuid) creation failed on the cluster "
+            . "(state '$state')\n"
+            if $state =~ /^(Failed|Deleting|Deleted)$/i;
         sleep 1;
     }
+    die "Lightbits volume $vol_name ($uuid) did not become Available within timeout "
+        . "(last state '$state')\n"
+        if $state ne 'Available';
 
     # The volid embeds the vmid so PVE can identify the owning guest (the UUID
     # remains the Lightbits volume's real identity, recovered via _vol_uuid).
