@@ -11,6 +11,7 @@ use JSON qw(encode_json decode_json);
 use LWP::UserAgent;
 use HTTP::Request;
 use File::Path qw(make_path);
+use Time::Local qw(timegm);
 use PVE::Tools qw(run_command);
 
 my $SYMLINK_DIR = '/dev/lightbits';
@@ -188,13 +189,90 @@ sub _symlink_path {
     return "$SYMLINK_DIR/$storeid/$volname";
 }
 
+# Force the kernel to re-read a namespace's capacity by rescanning its NVMe
+# *controller* (e.g. /dev/nvme0). We rescan the controller, not the namespace:
+# under native NVMe multipath the per-path node may not exist. No-op when the
+# volume isn't mapped on this node; idempotent. Used after operations that change
+# the backing data/size out-of-band (resize, snapshot rollback).
+sub _rescan_controller {
+    my ($storeid, $uuid) = @_;
+    my $link = _symlink_path($storeid, $uuid);
+    return unless -l $link;
+    my $dev = readlink($link);
+    return unless $dev && $dev =~ m{/dev/(nvme\d+)};
+    my $ctrl = $1;
+    eval { run_command(['nvme', 'ns-rescan', "/dev/$ctrl"]) };
+    warn "Could not rescan NVMe controller /dev/$ctrl: $@\n" if $@;
+}
+
 # Extract the Lightbits volume UUID from a Proxmox volume name. Names are
 # "vm-<vmid>-<uuid>" (the UUID is always the trailing component); a bare UUID is
-# also accepted. The capture also untaints the value for filesystem/API use.
+# also accepted. A trailing "@<snap>" (present on some PVE code paths) is dropped
+# first, so the UUID resolves from a snapshot-qualified name too. The capture
+# also untaints the value for filesystem/API use.
 sub _vol_uuid {
     my ($volname) = @_;
-    return $1 if $volname =~ /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+    (my $base = $volname) =~ s/\@.*$//;
+    return $1 if $base =~ /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
     die "Cannot determine Lightbits volume UUID from '$volname'\n";
+}
+
+# ── Snapshot naming & lookup helpers ──────────────────────────────────────────
+
+# LightOS snapshot names embed the source volume UUID. LightOS requires snapshot
+# names to be unique within a project, so embedding the UUID keeps two volumes'
+# identically-named Proxmox snapshots (e.g. both "snap1") distinct, and lets a
+# LightOS snapshot map back to its Proxmox name without relying on labels
+# (snapshots don't carry the volume's ownership labels).
+my $SNAP_PREFIX = 'snap-';
+
+sub _lb_snap_name {
+    my ($vol_uuid, $pve_snap) = @_;
+    return "${SNAP_PREFIX}${vol_uuid}-${pve_snap}";
+}
+
+# Inverse of _lb_snap_name. The UUID itself contains '-', so decode by fixed
+# shape rather than splitting on '-': prefix, 36-char UUID, '-', then the
+# Proxmox snapshot name. Returns undef for names not in our scheme.
+sub _pve_snap_name {
+    my ($lb_name) = @_;
+    return undef unless defined $lb_name
+        && $lb_name =~ /^\Q$SNAP_PREFIX\E[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-(.+)$/i;
+    return $1;
+}
+
+# All snapshots whose source is the given volume UUID. The list endpoint's
+# server-side source filter is not relied upon; we filter client-side on the
+# globally-unique sourceVolumeUUID, which is also what keeps the result correct
+# and node-safe when several hypervisors share a project.
+sub _snapshots_for_volume {
+    my ($scfg, $project, $vol_uuid) = @_;
+    my $data = eval { _api($scfg, 'GET', "/api/v2/projects/$project/snapshots") };
+    return [] if $@ || !$data;
+    return [ grep { ($_->{sourceVolumeUUID} // '') eq $vol_uuid }
+                @{ $data->{snapshots} // [] } ];
+}
+
+# Resolve a Proxmox snapshot name to its LightOS snapshot UUID. Dies if not
+# found (callers that must be idempotent run this under eval).
+sub _snap_uuid {
+    my ($scfg, $project, $volname, $pve_snap) = @_;
+    my $vol_uuid = _vol_uuid($volname);
+    my $want     = _lb_snap_name($vol_uuid, $pve_snap);
+    for my $s (@{ _snapshots_for_volume($scfg, $project, $vol_uuid) }) {
+        return $s->{UUID} if ($s->{name} // '') eq $want;
+    }
+    die "Lightbits snapshot '$pve_snap' not found for volume $vol_uuid\n";
+}
+
+# Parse a LightOS ISO-8601 UTC timestamp ("YYYY-MM-DDThh:mm:ss[.fraction]Z") to
+# epoch seconds. The value is UTC, so use timegm (not POSIX::mktime, which would
+# interpret it in the host's local timezone); the fractional part is ignored.
+sub _epoch_from_iso8601 {
+    my ($s) = @_;
+    return 0 unless defined $s
+        && $s =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/;
+    return timegm($6, $5, $4, $3, $2 - 1, $1 - 1900);
 }
 
 # ── Plugin registration ───────────────────────────────────────────────────────
@@ -243,6 +321,11 @@ sub parse_volname {
     # Bare UUID: a volume not owned by a guest -> owner 0.
     if ($volname =~ /^$uuid$/) {
         return ('images', $volname, 0, undef, undef, 0, 'raw');
+    }
+    # Snapshot-qualified "vm-<vmid>-<uuid>@<snap>": the snap name is returned in
+    # slot 5; $volname (slot 1) stays the base volume name.
+    if ($volname =~ /^(vm-(\d+)-$uuid)\@(.+)$/) {
+        return ('images', $1, $2, undef, $3, 0, 'raw');
     }
     die "unable to parse Lightbits volume name '$volname'\n";
 }
@@ -536,6 +619,20 @@ sub free_image {
     my $project = _project($scfg);
     my $uuid    = _vol_uuid($volname);
 
+    # Delete the volume's snapshots first: a deleted volume's snapshots are not
+    # removed with it, so leaving them behind would hold space and reserve names.
+    # Best-effort — a snapshot that unexpectedly can't be deleted is warned about
+    # but must not block freeing the volume, so `qm destroy --purge` still
+    # completes. (A clone created from a snapshot does not block deleting that
+    # snapshot on the LightOS versions tested — clone data is reference-counted.)
+    # We match only this volume's snapshots (by sourceVolumeUUID), so a destroy
+    # here never removes another node's.
+    for my $s (@{ _snapshots_for_volume($scfg, $project, $uuid) }) {
+        eval { _delete_snapshot($scfg, $project, $s->{UUID}); };
+        warn "Lightbits: could not delete snapshot $s->{name} ($s->{UUID}) "
+            . "of volume $uuid: $@" if $@;
+    }
+
     _api($scfg, 'DELETE', "/api/v2/volumes/$uuid?projectName=$project");
 
     my $link = _symlink_path($storeid, $uuid);
@@ -672,9 +769,28 @@ sub deactivate_volume {
 # ── Features ──────────────────────────────────────────────────────────────────
 
 sub volume_has_feature {
-    my ($class, $cfg, $feature, $storeid, $volname, $snap, $running) = @_;
-    my %features = (copy => 1, sparseinit => 0, resize => 1);
-    return $features{$feature} // 0;
+    my ($class, $scfg, $feature, $storeid, $volname, $snapname, $running, $opts) = @_;
+
+    # Nested {feature}{key}{format}, mirroring the base plugin. $key is 'snap'
+    # when a snapshot name is in play, else 'base'/'current'. We support raw
+    # volumes only, and:
+    #   - snapshot: on the current volume (PVE probes 'snapshot' with no snapname
+    #     when taking one); we do not offer nested snapshots (no 'snap' key).
+    #   - copy: whole-volume copy for clone/migrate of a base or current volume.
+    #   - resize: grow the current volume.
+    my $features = {
+        snapshot => { current => { raw => 1 } },
+        copy     => { base => { raw => 1 }, current => { raw => 1 } },
+        resize   => { base => { raw => 1 }, current => { raw => 1 } },
+    };
+
+    my (undef, undef, undef, undef, undef, $isBase, $format) =
+        $class->parse_volname($volname);
+
+    my $key = $snapname ? 'snap' : ($isBase ? 'base' : 'current');
+
+    return 1 if defined $features->{$feature}{$key}{$format};
+    return 0;
 }
 
 # ── Volume resize ──────────────────────────────────────────────────────────────
@@ -726,21 +842,179 @@ sub volume_resize {
     # PVE follows up with QEMU block_resize on a running guest (a small race), and
     # (2) some kernel/target combinations don't emit/honor that event reliably.
     # `nvme ns-rescan` forces a synchronous re-read, so the new size is visible
-    # before we return — cheap and idempotent. We rescan the *controller*
-    # (e.g. /dev/nvme0), not the namespace: under NVMe multipath the per-path node
-    # may not exist, and `blockdev --rereadpt` only re-reads a partition table,
-    # not the device capacity.
-    my $link = _symlink_path($storeid, $uuid);
-    if (-l $link) {
-        my $dev = readlink($link);
-        if ($dev && $dev =~ m{/dev/(nvme\d+)}) {
-            my $ctrl = $1;
-            eval { run_command(['nvme', 'ns-rescan', "/dev/$ctrl"]) };
-            warn "Could not rescan NVMe controller /dev/$ctrl after resize: $@\n" if $@;
-        }
-    }
+    # before we return — cheap and idempotent.
+    _rescan_controller($storeid, $uuid);
 
     return $bytes;
+}
+
+# ── Snapshots ──────────────────────────────────────────────────────────────────
+
+# Take a point-in-time snapshot of a volume. PVE routes snapshots of both stopped
+# and running guests here (raw volumes use the storage's native snapshot, not a
+# QEMU one); for a running guest the snapshot is crash-consistent — PVE freezes
+# the filesystem first when the guest runs qemu-guest-agent. The call is metadata
+# only (it does not touch the NVMe device).
+sub volume_snapshot {
+    my ($class, $scfg, $storeid, $volname, $snap) = @_;
+
+    my $project  = _project($scfg);
+    my $vol_uuid = _vol_uuid($volname);
+
+    # PVE already validates snapshot names; assert defensively so an out-of-charset
+    # name fails here rather than at the API.
+    die "invalid snapshot name '$snap'\n"
+        unless $snap =~ /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+    my $body = {
+        name             => _lb_snap_name($vol_uuid, $snap),
+        sourceVolumeUUID => $vol_uuid,
+        projectName      => $project,
+    };
+    my $result    = _api($scfg, 'POST', "/api/v2/projects/$project/snapshots", $body);
+    my $snap_uuid = $result->{UUID} or die "Lightbits snapshot creation returned no UUID\n";
+
+    # Wait for the snapshot to become Available, failing on a terminal state or a
+    # timeout so we never report a snapshot as taken when it never materialised.
+    my $state = '';
+    for my $attempt (1..30) {
+        my $s  = _api($scfg, 'GET', "/api/v2/projects/$project/snapshots/$snap_uuid");
+        $state = $s->{state} // '';
+        last if $state eq 'Available';
+        die "Lightbits snapshot $snap ($snap_uuid) creation failed (state '$state')\n"
+            if $state =~ /^(Failed|Deleting|Deleted)$/i;
+        sleep 1;
+    }
+    die "Lightbits snapshot $snap ($snap_uuid) did not become Available within "
+        . "timeout (last state '$state')\n"
+        if $state ne 'Available';
+
+    return undef;
+}
+
+# Delete a snapshot idempotently. A concurrent or repeated delete can fail in
+# several ways — the snapshot is already in state 'Deleting', another delete task
+# for it is in flight, or a racing delete leaves an etag/precondition mismatch.
+# Rather than enumerate every error string, we re-check after any failure: if the
+# snapshot is now absent or already being deleted, the delete effectively
+# succeeded; only a genuine refusal (the snapshot is still present and Available)
+# is raised to the caller.
+sub _delete_snapshot {
+    my ($scfg, $project, $snap_uuid) = @_;
+    eval { _api($scfg, 'DELETE', "/api/v2/projects/$project/snapshots/$snap_uuid"); };
+    my $err = $@ or return;
+    my $s = eval { _api($scfg, 'GET', "/api/v2/projects/$project/snapshots/$snap_uuid") };
+    if (!$@) {
+        my $gone  = !(ref($s) eq 'HASH' && %$s);       # _api returns {} on 404
+        my $state = (ref($s) eq 'HASH') ? ($s->{state} // '') : '';
+        return if $gone || $state =~ /^(Deleting|Deleted)$/i;
+    }
+    die $err;
+}
+
+sub volume_snapshot_delete {
+    my ($class, $scfg, $storeid, $volname, $snap, $running) = @_;
+
+    my $project = _project($scfg);
+
+    # Idempotent on an already-removed snapshot: _snap_uuid dies when the snapshot
+    # is gone from the listing, which we treat as success (PVE cleanup paths can
+    # fire delete more than once).
+    my $snap_uuid = eval { _snap_uuid($scfg, $project, $volname, $snap) };
+    return undef unless defined $snap_uuid;
+
+    _delete_snapshot($scfg, $project, $snap_uuid);
+    return undef;
+}
+
+# Assert that rolling back $volname to $snap is allowed. Called by PVE inside the
+# config lock, before the guest is stopped.
+sub volume_rollback_is_possible {
+    my ($class, $scfg, $storeid, $volname, $snap, $blockers) = @_;
+
+    my $project   = _project($scfg);
+    my $vol_uuid  = _vol_uuid($volname);
+    my $snap_uuid = _snap_uuid($scfg, $project, $volname, $snap);
+
+    my $vol   = _api($scfg, 'GET', "/api/v2/volumes/$vol_uuid?projectName=$project");
+    my $sd    = _api($scfg, 'GET', "/api/v2/projects/$project/snapshots/$snap_uuid");
+    my $vsize = int($vol->{size} // 0);
+    my $ssize = int($sd->{size}  // 0);
+
+    # A snapshot records the volume's size at capture time, and rollback restores
+    # that size. If the volume was grown afterwards, rolling back would make the
+    # namespace smaller than the size Proxmox's VM config still expects; refuse so
+    # the device and the config stay consistent.
+    die "cannot roll back '$volname' to snapshot '$snap': the volume was resized "
+        . "after the snapshot was taken (snapshot ${ssize}B < volume ${vsize}B); "
+        . "rolling back would shrink the device below the size Proxmox expects.\n"
+        if $ssize && $ssize < $vsize;
+
+    return 1;
+}
+
+# Roll a volume back to a snapshot using LightOS's native server-side rollback.
+# This is the efficient path: the cluster re-points the volume to the snapshot in
+# place — near-instant, no host-side block copy, and the volume keeps its existing
+# thin-provisioned allocation. PVE stops the guest before calling this, so the
+# device is not open; we rescan the controller afterwards to refresh capacity.
+sub volume_snapshot_rollback {
+    my ($class, $scfg, $storeid, $volname, $snap) = @_;
+
+    my $project   = _project($scfg);
+    my $vol_uuid  = _vol_uuid($volname);
+    my $snap_uuid = _snap_uuid($scfg, $project, $volname, $snap);
+
+    _api($scfg, 'PUT', "/api/v2/projects/$project/volumes/$vol_uuid/rollback",
+        { srcSnapshotUUID => $snap_uuid });
+
+    # Wait for the volume to return to Available, failing on a terminal state or a
+    # timeout rather than assuming success.
+    my $state = '';
+    for my $attempt (1..60) {
+        my $v  = _api($scfg, 'GET', "/api/v2/volumes/$vol_uuid?projectName=$project");
+        $state = $v->{state} // '';
+        last if $state eq 'Available';
+        die "Lightbits volume $vol_uuid rollback to '$snap' failed (state '$state')\n"
+            if $state =~ /^(Failed|Deleting|Deleted)$/i;
+        sleep 2;
+    }
+    die "Lightbits volume $vol_uuid rollback to '$snap' did not complete "
+        . "(last state '$state')\n"
+        if $state ne 'Available';
+
+    _rescan_controller($storeid, $vol_uuid);
+
+    return undef;
+}
+
+# Snapshot inventory for a volume, keyed by Proxmox snapshot name. Overrides the
+# base (which shells out to qemu-img on a filesystem path this block storage does
+# not have). `order` reflects creation order; only snapshots in our naming scheme
+# are reported.
+sub volume_snapshot_info {
+    my ($class, $scfg, $storeid, $volname) = @_;
+
+    my $project  = _project($scfg);
+    my $vol_uuid = _vol_uuid($volname);
+
+    my @snaps;
+    for my $s (@{ _snapshots_for_volume($scfg, $project, $vol_uuid) }) {
+        my $name = _pve_snap_name($s->{name});
+        next unless defined $name;
+        push @snaps, {
+            name => $name,
+            id   => $s->{UUID},
+            ts   => _epoch_from_iso8601($s->{creationTime}),
+        };
+    }
+
+    my $info  = {};
+    my $order = 0;
+    for my $s (sort { $a->{ts} <=> $b->{ts} } @snaps) {
+        $info->{ $s->{name} } = { id => $s->{id}, order => $order++, timestamp => $s->{ts} };
+    }
+    return $info;
 }
 
 # NB: do not call __PACKAGE__->register() here. PVE::Storage's third-party
