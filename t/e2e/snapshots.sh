@@ -111,7 +111,13 @@ SNAPS_BEFORE="$(qm listsnapshot "$VMID" | grep -c snap || true)"
 qm destroy "$VMID" --purge 1 >/dev/null
 trap - EXIT
 # the volume and its snapshots should be gone from the storage listing
-if pvesm list "$STORAGE" | grep -q "vm-${VMID}-"; then bad "volume not freed on destroy"; else ok "volume freed on destroy"; fi
+if ! PVE_LIST="$(pvesm list "$STORAGE" 2>&1)"; then
+    bad "could not list storage after destroy: $PVE_LIST"
+elif grep -q "vm-${VMID}-" <<<"$PVE_LIST"; then
+    bad "volume not freed on destroy"
+else
+    ok "volume freed on destroy"
+fi
 echo "   (had $SNAPS_BEFORE snapshot config entries before destroy)"
 
 echo "== $pass passed, $fail failed =="

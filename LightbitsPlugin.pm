@@ -655,9 +655,13 @@ sub free_image {
 
 sub path {
     my ($class, $cfg, $volname, $storeid, $snap) = @_;
+    # Honor a snapshot embedded in the volname (vm-<vmid>-<uuid>@<snap>) even when
+    # PVE does not pass it as a separate $snap argument; otherwise a
+    # snapshot-qualified volname would be treated as the live volume.
+    my (undef, undef, $vmid, undef, $parsed_snap) = $class->parse_volname($volname);
+    $snap //= $parsed_snap;
     die "Snapshots not supported by Lightbits plugin\n" if $snap;
     # Return the owning vmid so PVE frees this disk when its VM is destroyed.
-    my (undef, undef, $vmid) = $class->parse_volname($volname);
     return (_symlink_path($storeid, _vol_uuid($volname)), $vmid, 'images');
 }
 
@@ -794,10 +798,13 @@ sub volume_has_feature {
         resize   => { base => { raw => 1 }, current => { raw => 1 } },
     };
 
-    my (undef, undef, undef, undef, undef, $isBase, $format) =
+    my (undef, undef, undef, undef, $parsed_snap, $isBase, $format) =
         $class->parse_volname($volname);
 
-    my $key = $snapname ? 'snap' : ($isBase ? 'base' : 'current');
+    # A snapshot may arrive either as the $snapname argument or embedded in the
+    # volname (vm-<vmid>-<uuid>@<snap>); honor both.
+    $snapname //= $parsed_snap;
+    my $key = defined($snapname) && length($snapname) ? 'snap' : ($isBase ? 'base' : 'current');
 
     return 1 if defined $features->{$feature}{$key}{$format};
     return 0;
