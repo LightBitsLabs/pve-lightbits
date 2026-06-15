@@ -23,6 +23,7 @@ VMID="${VMID:-9001}"
 DISK_GB="${DISK_GB:-2}"
 WRITE_MB="${WRITE_MB:-400}"
 ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/lb_e2e_rb_err.XXXXXX")"
+TEST_VM_NAME="lb-snap-e2e"   # ownership marker: we only ever destroy a VM with this name
 
 pass=0; fail=0
 ok()   { echo "PASS: $1"; pass=$((pass+1)); }
@@ -42,8 +43,16 @@ else
     echo "NOTE: unit tests not found next to this script; skipping the unit gate." >&2
 fi
 
+# True only if $VMID exists AND is named $TEST_VM_NAME — i.e. a VM this script
+# owns (the one it created, or a leftover from a prior aborted run). This guards
+# every destroy so a misconfigured VMID can never delete an unrelated guest.
+is_our_vm() {
+    local name
+    name="$(qm config "$VMID" 2>/dev/null | awk -F': ' '/^name:/{print $2; exit}')" || return 1
+    [ "$name" = "$TEST_VM_NAME" ]
+}
 cleanup() {
-    qm destroy "$VMID" --purge 1 >/dev/null 2>&1 || true
+    if is_our_vm; then qm destroy "$VMID" --purge 1 >/dev/null 2>&1 || true; fi
     rm -f "$ERR_FILE" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -60,8 +69,14 @@ deactivate() {
 md5_head() { dd if="$1" bs=1M count="$WRITE_MB" iflag=direct status=none | md5sum | cut -d' ' -f1; }
 
 echo "== setup: VM $VMID, ${DISK_GB}G disk on $STORAGE =="
+# Refuse to run if $VMID is already taken by a VM we don't own, rather than
+# destroying it. A leftover test VM (same name) from a prior run is reclaimed.
+if qm config "$VMID" >/dev/null 2>&1 && ! is_our_vm; then
+    echo "ABORT: VM $VMID already exists and is not the test VM '$TEST_VM_NAME'; refusing to destroy it. Set VMID to an unused id." >&2
+    exit 1
+fi
 cleanup
-qm create "$VMID" --memory 512 --scsihw virtio-scsi-single --name lb-snap-e2e >/dev/null
+qm create "$VMID" --memory 512 --scsihw virtio-scsi-single --name "$TEST_VM_NAME" >/dev/null
 qm set "$VMID" --scsi0 "${STORAGE}:${DISK_GB}" >/dev/null
 VOL="$(volid)"
 echo "   disk: $VOL"
