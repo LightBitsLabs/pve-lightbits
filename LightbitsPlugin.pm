@@ -245,16 +245,23 @@ sub _pve_snap_name {
 # server-side source filter is not relied upon; we filter client-side on the
 # globally-unique sourceVolumeUUID, which is also what keeps the result correct
 # and node-safe when several hypervisors share a project.
+#
+# A failed listing (auth/transport/server error) propagates as a die rather than
+# being masked as an empty result: a caller must not mistake a transient failure
+# for "no snapshots" (e.g. a delete would then look idempotently successful while
+# leaving the snapshot behind). free_image, which must stay best-effort, wraps
+# this call in eval.
 sub _snapshots_for_volume {
     my ($scfg, $project, $vol_uuid) = @_;
-    my $data = eval { _api($scfg, 'GET', "/api/v2/projects/$project/snapshots") };
-    return [] if $@ || !$data;
+    my $data = _api($scfg, 'GET', "/api/v2/projects/$project/snapshots");
     return [ grep { ($_->{sourceVolumeUUID} // '') eq $vol_uuid }
                 @{ $data->{snapshots} // [] } ];
 }
 
-# Resolve a Proxmox snapshot name to its LightOS snapshot UUID. Dies if not
-# found (callers that must be idempotent run this under eval).
+# Resolve a Proxmox snapshot name to its LightOS snapshot UUID. Dies with "not
+# found" when the snapshot is genuinely absent, or propagates a listing failure
+# (auth/transport/server error); callers that need idempotency distinguish the
+# two (see volume_snapshot_delete).
 sub _snap_uuid {
     my ($scfg, $project, $volname, $pve_snap) = @_;
     my $vol_uuid = _vol_uuid($volname);
@@ -627,7 +634,10 @@ sub free_image {
     # snapshot on the LightOS versions tested — clone data is reference-counted.)
     # We match only this volume's snapshots (by sourceVolumeUUID), so a destroy
     # here never removes another node's.
-    for my $s (@{ _snapshots_for_volume($scfg, $project, $uuid) }) {
+    my $snaps = eval { _snapshots_for_volume($scfg, $project, $uuid) };
+    warn "Lightbits: could not list snapshots of volume $uuid before freeing it "
+        . "(any snapshots may be left behind): $@" if $@;
+    for my $s (@{ $snaps || [] }) {
         eval { _delete_snapshot($scfg, $project, $s->{UUID}); };
         warn "Lightbits: could not delete snapshot $s->{name} ($s->{UUID}) "
             . "of volume $uuid: $@" if $@;

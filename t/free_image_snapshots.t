@@ -22,9 +22,11 @@ my $OTHER = 'baddcafe-0000-4000-8000-000000000999';
 
 my @deleted;            # ordered list of DELETEd paths
 my $snap_delete_err;    # if set, snapshot DELETEs die with this
+my $list_err;           # if set, GET /snapshots dies with this (transient failure)
 no warnings 'redefine';
 *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
     my ($scfg, $method, $path, $body) = @_;
+    if ($method eq 'GET' && $path =~ m{/snapshots$}) { die $list_err if $list_err; }
     return { snapshots => [
         { name => "snap-$UUID-a", UUID => 'sa', sourceVolumeUUID => $UUID },
         { name => "snap-$UUID-b", UUID => 'sb', sourceVolumeUUID => $UUID },
@@ -66,5 +68,18 @@ $snap_delete_err = "boom: snapshot has a dependent clone\n";
 }
 is( $@, '', 'free_image still completes when a snapshot cannot be deleted' );
 like( $deleted[-1], qr{/api/v2/volumes/$UUID}, 'the volume is still deleted' );
+
+# ── best-effort: a snapshot-listing failure does not block freeing the volume ──
+@deleted = ();
+$snap_delete_err = undef;
+$list_err = "GET failed: 401 Unauthorized (token expired)\n";
+{
+    local $SIG{__WARN__} = sub { };   # swallow the expected warning
+    eval { $class->free_image('lb-storage', $scfg, $volname, 0); };
+}
+is( $@, '', 'free_image still completes when snapshots cannot be listed' );
+is( scalar(@deleted), 1, 'no snapshot deletes attempted when the listing failed' );
+like( $deleted[0], qr{/api/v2/volumes/$UUID}, 'the volume is still deleted' );
+$list_err = undef;
 
 done_testing();

@@ -23,12 +23,14 @@ my $SUUID = 'aaaaaaaa-0000-4000-8000-000000000001';
 
 my $present  = 1;       # is the snapshot in the listing? (drives _snap_uuid)
 my $delete_err;         # if set, DELETE dies with this
+my $list_err;           # if set, GET /snapshots dies with this (transient failure)
 my $recheck  = 'gone';  # GET /snapshots/{uuid} after a delete error: gone|Deleting|Available
 my $deleted;            # captured DELETE path
 no warnings 'redefine';
 *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
     my ($scfg, $method, $path, $body) = @_;
     if ($method eq 'GET' && $path =~ m{/snapshots$}) {
+        die $list_err if $list_err;
         return { snapshots => $present
             ? [ { name => "snap-$UUID-snap1", UUID => $SUUID, sourceVolumeUUID => $UUID } ]
             : [] };
@@ -78,5 +80,17 @@ is( eval { $class->volume_snapshot_delete($scfg, 'lb-storage', $volname, 'snap1'
 ok( !eval { $class->volume_snapshot_delete($scfg, 'lb-storage', $volname, 'snap1'); 1 },
     'a refusal that leaves the snapshot present is surfaced' );
 like( $@, qr/permission denied/, 'the original error is propagated to the caller' );
+
+# ── transient listing failure must NOT look like an idempotent success ─────────
+# A 401/timeout while listing snapshots makes _snap_uuid die, but with an API
+# error (not "not found"), so the delete must surface it rather than silently
+# returning success and leaving the snapshot behind.
+($present, $delete_err, $deleted) = (1, undef, undef);
+$list_err = "GET failed: 401 Unauthorized (token expired)\n";
+ok( !eval { $class->volume_snapshot_delete($scfg, 'lb-storage', $volname, 'snap1'); 1 },
+    'a transient listing failure is surfaced, not treated as a successful delete' );
+like( $@, qr/401 Unauthorized/, 'the listing error is propagated to the caller' );
+is( $deleted, undef, 'no DELETE issued when the snapshot could not be resolved' );
+$list_err = undef;
 
 done_testing();
