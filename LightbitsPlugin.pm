@@ -917,11 +917,21 @@ sub volume_snapshot_delete {
 
     my $project = _project($scfg);
 
-    # Idempotent on an already-removed snapshot: _snap_uuid dies when the snapshot
-    # is gone from the listing, which we treat as success (PVE cleanup paths can
-    # fire delete more than once).
-    my $snap_uuid = eval { _snap_uuid($scfg, $project, $volname, $snap) };
-    return undef unless defined $snap_uuid;
+    # Idempotent on an already-removed snapshot: _snap_uuid dies with "not found"
+    # when the snapshot is gone from the listing, which we treat as success (PVE
+    # cleanup paths can fire delete more than once). A transient failure (API,
+    # auth, listing) must NOT look like a successful delete, so re-raise anything
+    # that isn't a genuine "not found".
+    my ($snap_uuid, $err);
+    {
+        local $@;
+        $snap_uuid = eval { _snap_uuid($scfg, $project, $volname, $snap) };
+        $err = $@;
+    }
+    if (!defined $snap_uuid) {
+        die $err if $err && $err !~ /not found/i;
+        return undef;
+    }
 
     _delete_snapshot($scfg, $project, $snap_uuid);
     return undef;

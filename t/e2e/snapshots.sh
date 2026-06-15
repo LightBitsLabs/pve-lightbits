@@ -22,6 +22,7 @@ STORAGE="${STORAGE:-lb-storage}"
 VMID="${VMID:-9001}"
 DISK_GB="${DISK_GB:-2}"
 WRITE_MB="${WRITE_MB:-400}"
+ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/lb_e2e_rb_err.XXXXXX")"
 
 pass=0; fail=0
 ok()   { echo "PASS: $1"; pass=$((pass+1)); }
@@ -41,7 +42,10 @@ else
     echo "NOTE: unit tests not found next to this script; skipping the unit gate." >&2
 fi
 
-cleanup() { qm destroy "$VMID" --purge 1 >/dev/null 2>&1 || true; }
+cleanup() {
+    qm destroy "$VMID" --purge 1 >/dev/null 2>&1 || true
+    rm -f "$ERR_FILE" 2>/dev/null || true
+}
 trap cleanup EXIT
 
 # Resolve this VM's disk volid and the device path (activating the volume).
@@ -80,10 +84,10 @@ if [ "$AFTER" = "$A" ] && [ "$A" != "$B" ]; then ok "rollback reverts data to th
 
 # 3. resize-rollback guard: grow the disk, then rollback must be refused
 qm resize "$VMID" scsi0 +1G >/dev/null
-if qm rollback "$VMID" snapA >/dev/null 2>/tmp/lb_e2e_rb_err; then
+if qm rollback "$VMID" snapA >/dev/null 2>"$ERR_FILE"; then
     bad "resize-rollback guard (rollback should have been refused)"
 else
-    grep -qi "resized" /tmp/lb_e2e_rb_err && ok "resize-rollback guard refuses a shrinking rollback" \
+    grep -qi "resized" "$ERR_FILE" && ok "resize-rollback guard refuses a shrinking rollback" \
         || bad "resize-rollback guard (refused, but unexpected error)"
 fi
 

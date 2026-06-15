@@ -24,6 +24,9 @@ my $SUUID = 'aaaaaaaa-0000-4000-8000-000000000001';
 my %put;                       # captured PUT
 my $vol_state = 'Available';
 no warnings 'redefine';
+# No symlink exists on the test host, so the real _rescan_controller is a no-op
+# today; stub it so the test stays hermetic regardless of the host's /dev state.
+*PVE::Storage::Custom::LightbitsPlugin::_rescan_controller = sub { };
 *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
     my ($scfg, $method, $path, $body) = @_;
     # snapshot listing -> resolve the name to a UUID
@@ -63,5 +66,11 @@ $vol_state = 'Updating';
 ok( !eval { $class->volume_snapshot_rollback($scfg, 'lb-storage', $volname, 'snap1'); 1 },
     'dies when the volume never returns to Available' );
 like( $@, qr/did not complete/, 'error reports the timeout' );
+
+# ── terminal failure state fails fast ──────────────────────────────────────────
+$vol_state = 'Failed';
+ok( !eval { $class->volume_snapshot_rollback($scfg, 'lb-storage', $volname, 'snap1'); 1 },
+    'dies when the volume enters a terminal failure state' );
+like( $@, qr/rollback to 'snap1' failed/, 'error reports the failed rollback' );
 
 done_testing();
