@@ -28,6 +28,13 @@ my $has = sub {
 
 ok(  $has->('snapshot', undef), "snapshot allowed on the current volume (snapname undef)" );
 ok( !$has->('snapshot', 'snap1'), "no nested snapshots (snapshot of a snapshot is refused)" );
+
+# A snapshot embedded in the volname (vm-<vmid>-<uuid>@<snap>) must be honored even
+# when $snapname is unset, so it is treated as snapshot context (not the live volume).
+ok(
+    !$class->volume_has_feature($scfg, 'snapshot', 'lb-storage', "$volname\@snap1", undef, 0),
+    'embedded @snap in volname is treated as snapshot context (no nested snapshots)'
+);
 ok(  $has->('copy', undef),   'copy allowed on the current volume' );
 ok(  $has->('resize', undef), 'resize allowed' );
 ok( !$has->('clone', undef),  'clone (linked clone) not offered' );
