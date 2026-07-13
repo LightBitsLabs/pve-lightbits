@@ -1,0 +1,12 @@
+# CodeRabbit configuration
+# https://docs.coderabbit.ai/reference/yaml-template
+reviews:
+  pre_merge_checks:
+    # This plugin documents its subs with `#` comment blocks, matching the
+    # idiomatic style of PVE's own storage plugins (which do not use per-sub
+    # POD). CodeRabbit's docstring scorer does not credit these `#` comments,
+    # so we keep the check as a non-blocking warning with a low threshold
+    # rather than adding non-idiomatic POD purely to satisfy the scorer.
+    docstrings:
+      mode: warning
+      threshold: 10
