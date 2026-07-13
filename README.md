@@ -85,7 +85,7 @@ You need to collect three values before installation:
 
 The subsystem NQN is fetched automatically from the cluster API — you no longer need to look it up manually. If you prefer to pin it explicitly (e.g. for air-gapped environments where the API may be unreachable at connect time), you can still supply `--lb_subsys_nqn`.
 
-> **Note:** `nvme discover` does not work with Lightbits — the cluster does not expose an NVMe-oF Discovery Controller. The plugin connects directly using `nvme connect`, using the NQN retrieved from the cluster API.
+> **Note:** LightOS does expose a standard NVMe-oF Discovery Controller (port 8009), and Lightbits provides an official [`discovery-client`](https://github.com/LightBitsLabs/discovery-client) daemon that uses it to keep a host's connections in sync as cluster nodes are added or removed — no manual re-configuration needed. This plugin does **not** use `discovery-client`; it connects directly via `nvme connect` to the endpoint(s) listed in `lb_nvme_host`, using the NQN retrieved from the cluster API. That means **you are responsible for keeping `lb_nvme_host` in sync with cluster membership yourself** — if a data node is added or removed, update `lb_nvme_host` (see [Installation](#installation)) accordingly. This is a known limitation; see the project's issue tracker for the status of integrating `discovery-client`.
 
 #### Getting a JWT token
 
@@ -206,7 +206,7 @@ Check that TCP port 4420 is reachable from the Proxmox host:
 nc -zv <lightbits-ip> 4420
 ```
 
-A successful connection confirms the network path is open. The actual NVMe-oF session is established by the plugin when a VM starts — `nvme discover` does not work with Lightbits and should not be used.
+A successful connection confirms the network path is open. The actual NVMe-oF session is established by the plugin when a VM starts, directly via `nvme connect` — this plugin does not run `nvme discover` or `discovery-client` (see the note in [On the Lightbits side](#on-the-lightbits-side)).
 
 ---
 
