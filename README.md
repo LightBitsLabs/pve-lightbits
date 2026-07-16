@@ -17,6 +17,9 @@ Proxmox VE manages VM disks through a pluggable storage layer. This plugin teach
 | **Start a VM** | An NVMe-oF connection is established; the volume appears as a block device |
 | **Stop a VM** | The NVMe-oF connection is torn down when no volumes remain active |
 | **Delete a VM disk** | The volume is deleted from Lightbits via the REST API |
+| **Resize a VM disk** | The Lightbits volume is grown online or offline (`qm resize`); a running VM sees the new capacity immediately, no downtime |
+| **Snapshot a VM disk** | A point-in-time Lightbits snapshot is created (`qm snapshot`), project-scoped and crash-consistent for a running guest |
+| **Roll back a VM disk** | The volume is restored to a prior snapshot via the cluster's native server-side rollback (`qm rollback`) — near-instant, no host-side data copy |
 | **Storage capacity** | Proxmox dashboard shows total / available / used space from the Lightbits cluster |
 
 ### Why use Lightbits instead of local storage?
