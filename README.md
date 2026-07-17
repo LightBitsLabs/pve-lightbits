@@ -206,6 +206,8 @@ pvesm set lb-storage --lb_api_host  192.168.10.10:443,192.168.10.11:443,192.168.
 pvesm set lb-storage --lb_nvme_host 192.168.10.10:4420,192.168.10.11:4420,192.168.10.12:4420,192.168.10.13:4420
 ```
 
+Both `pvesm set` commands update `storage.cfg` immediately, but they take effect differently for an already-active storage: `lb_api_host` changes apply to the very next REST API call, with no volume activation needed. `lb_nvme_host` changes are only picked up the next time a volume on this storage is activated (its `discovery-client` config is rewritten then, not immediately) — and *removing* an endpoint still leaves its existing connection in place until the subsystem's last active volume across every storage on this host is deactivated (see the note above).
+
 #### A note on the Web UI
 
 Third-party storage plugins are **not** listed in **Datacenter → Storage → Add** — that menu is hardcoded in the Proxmox web interface for the storage types shipped with Proxmox itself (Ceph/RBD, ZFS, NFS, …). Add the `lightbits` storage with the `pvesm` command above (or by editing `/etc/pve/storage.cfg`).

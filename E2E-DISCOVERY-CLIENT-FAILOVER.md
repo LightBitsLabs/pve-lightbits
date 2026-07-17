@@ -7,8 +7,9 @@ LightOS v3.19.2 cluster (`10.17.186.4/13/19/23/20`, mgmt `192.168.16.156/200/215
 `192.168.21.148`, `192.168.24.164`). This is internal test documentation, not
 user-facing — do not move or link this into `docs/`.
 
-Covers the deployment + destructive/failure-injection e2e requested to close out
-[[REVIEW-FINDINGS.md]] items #3 and #8 before this branch's PR.
+Covers the deployment + destructive/failure-injection e2e for this branch's two
+main changes — delegating NVMe-oF connect to discovery-client, and REST API
+failover — before opening its PR.
 
 ---
 
@@ -40,8 +41,8 @@ install.
 ### 1.2 Deployment otherwise clean
 - `LightbitsPlugin.pm` from this branch: `perl -c` OK on the target host.
 - `pvesm set lb-storage --lb_api_host <5 endpoints>` succeeded with no error —
-  confirms dropping `fixed` on `lb_api_host`/`lb_nvme_host` (finding #3's
-  near-term fix) actually works, not just passes a unit test.
+  confirms dropping `fixed` on `lb_api_host`/`lb_nvme_host` actually works live,
+  not just passes a unit test.
 - discovery-client (once installed via the `ubuntu` repo workaround above)
   started cleanly, auto-created `/etc/discovery-client/{discovery.d,internal}/`.
 
@@ -62,7 +63,7 @@ not a mock:
 
 ---
 
-## 3. `lb_api_host` REST failover (finding #8)
+## 3. `lb_api_host` REST failover
 
 With the multi-endpoint `lb_api_host` live, blocked endpoints via `iptables -j DROP`
 on the PVE host (simulates a silently-dead/partitioned node, worse-case than a
@@ -85,7 +86,7 @@ service that actively refuses):
 
 ---
 
-## 4. Node-failure / discovery-client behavior (finding #3) — the main event
+## 4. Node-failure / discovery-client behavior — the main event
 
 ### 4.1 Does `node-manager` down take out the data path too, or just control plane?
 **Both, but not identically.** Stopping `node-manager` on a live node
@@ -181,8 +182,8 @@ only *new* seed-file changes would have been missed while it was down.
    be exercised with only 5 nodes and none spare.
 3. Consider **logging all attempted endpoints**, not just the last, in
    `_api`'s failure message (§3).
-4. Findings #1 (ACL-on-activate) and #2 (TLS verification) remain unimplemented
-   and were not in scope for this branch's e2e — untouched by this pass.
+4. ACL-on-activate and TLS verification hardening remain unimplemented and
+   were not in scope for this branch's e2e — untouched by this pass.
 
 ## 7. Post-review fixes (CodeRabbit, PR #19)
 Two correctness issues raised on the PR were fixed after this e2e round, covered
