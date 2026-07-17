@@ -367,7 +367,10 @@ sub _epoch_from_iso8601 {
 # Highest storage APIVER whose contract this plugin satisfies. Bump as newer
 # Proxmox VE releases are validated. See the API changelog at
 # https://pve.proxmox.com/wiki/Storage_Plugin_Development
-my $TESTED_APIVER = 14;   # PVE 9.x: qemu_blockdev_options (12), get_identity (14)
+my $TESTED_APIVER = 15;   # PVE 9.x: qemu_blockdev_options (12), get_identity (14),
+                          # volume_resize 'snapname' param + volume_snapshot_info
+                          # 'virtual-size' field (15) — both additive/optional per
+                          # libpve-storage-perl 9.1.6's changelog, no plugin change needed.
 
 # Report the storage API version of the *running* host rather than a fixed
 # number, because the APIVER differs across PVE point releases and the loader
