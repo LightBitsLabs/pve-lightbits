@@ -14,7 +14,8 @@ use File::Path qw(make_path);
 use Time::Local qw(timegm);
 use PVE::Tools qw(run_command);
 
-my $SYMLINK_DIR = '/dev/lightbits';
+# Overridable in tests.
+our $SYMLINK_DIR = '/dev/lightbits';
 
 # ── Lightbits REST API helper ─────────────────────────────────────────────────
 
@@ -36,7 +37,12 @@ sub _api_endpoints {
 # here to hold one across calls the way Cinder does — and cycles through every
 # configured endpoint on a transport failure or 5xx before giving up. A 4xx is
 # a definitive answer from a healthy node (every endpoint fronts the same
-# cluster state) and is not retried against another one.
+# cluster state) and is not retried against another one. Retrying across
+# endpoints is further restricted to GET/HEAD: a 5xx can arrive after a POST
+# (alloc_image, snapshot create) or other mutation already committed on the
+# server (e.g. a proxy timeout after the backend succeeded), so retrying it
+# against a different endpoint risks a duplicate/orphaned resource. GET/HEAD
+# have no such side effect, so those are safe to retry.
 sub _api {
     my ($scfg, $method, $path, $body, %opts) = @_;
 
@@ -69,8 +75,9 @@ sub _api {
 
         $last_err = "Lightbits API $method $path failed via $host: "
             . $res->status_line . " — " . $res->content . "\n";
-        die $last_err
-            unless $res->code >= 500 || ($res->header('Client-Warning') // '') eq 'Internal response';
+        my $retryable_method = $method =~ /^(?:GET|HEAD)$/;
+        die $last_err unless $retryable_method
+            && ($res->code >= 500 || ($res->header('Client-Warning') // '') eq 'Internal response');
     }
     die $last_err;
 }
@@ -448,8 +455,11 @@ sub properties {
             description => "Lightbits data-node address(es) used to seed discovery-client: "
                 . "a host:port, or a comma-separated list (e.g. "
                 . "192.168.1.1:4420,192.168.1.2:4420). List every data node on a "
-                . "multi-node cluster — discovery-client then keeps itself in sync as "
-                . "nodes are added or removed.",
+                . "multi-node cluster — discovery-client then discovers nodes added to "
+                . "the cluster later on its own, but does not proactively drop the "
+                . "connection to a node removed from this list; shrinking it only takes "
+                . "full effect once the connection is cleared by this storage's own "
+                . "final deactivation (or a manual 'nvme disconnect').",
             type        => 'string',
         },
         lb_subsys_nqn => {
@@ -835,6 +845,18 @@ sub _nqn_still_in_use {
     return 0;
 }
 
+# True if this storeid (not any other) still has an active volume symlink.
+# Every volume of a given storeid shares the same cluster/subsystem, so unlike
+# _nqn_still_in_use above this needs no NQN check of its own.
+sub _storeid_still_in_use {
+    my ($storeid) = @_;
+    return 0 unless -d "$SYMLINK_DIR/$storeid";
+    for my $l (glob("$SYMLINK_DIR/$storeid/*")) {
+        return 1 if -l $l;
+    }
+    return 0;
+}
+
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
@@ -843,19 +865,23 @@ sub deactivate_volume {
 
     unlink $link if -l $link;
 
-    # Tear down only when no volume of ANY storage on this host still maps this
-    # subsystem — checked from local symlinks, not the API. `nvme disconnect` is
-    # subsystem-wide (drops every path/controller for the NQN), so a per-storid
-    # or API-derived check could tear down paths still in use by another storage
-    # that shares the same cluster, or fire on a transient API error.
+    # Remove this storage's own discovery-client seed as soon as none of ITS
+    # volumes are active, independent of whether another storage shares the
+    # same cluster/subsystem — that sharing is exactly what the subsystem-wide
+    # disconnect below still has to respect, but this storage's own seed file
+    # has no reason to wait on an unrelated storage's activity.
+    _remove_dsc_conf($storeid) unless _storeid_still_in_use($storeid);
+
+    # Disconnect only when no volume of ANY storage on this host still maps
+    # this subsystem — checked from local symlinks, not the API. `nvme
+    # disconnect` is subsystem-wide (drops every path/controller for the NQN),
+    # so a per-storeid or API-derived check could tear down paths still in use
+    # by another storage that shares the same cluster, or fire on a transient
+    # API error. discovery-client does not proactively tear down connections
+    # on its own (see the "discovery-client integration" note above
+    # _dsc_conf_path), so without this the subsystem would stay connected
+    # indefinitely after the last volume using it goes away.
     unless (_nqn_still_in_use($subsys_nqn)) {
-        # Remove our discovery-client seed first...
-        _remove_dsc_conf($storeid);
-        # ...and still explicitly disconnect: discovery-client does not
-        # proactively tear down connections on its own (see the "discovery-client
-        # integration" note above _dsc_conf_path), so without this the subsystem
-        # would stay connected indefinitely after the last volume using it goes
-        # away.
         run_command(['nvme', 'disconnect', '-n', $subsys_nqn])
             if _is_connected($subsys_nqn);
     }

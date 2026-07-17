@@ -14,28 +14,28 @@ Covers the deployment + destructive/failure-injection e2e requested to close out
 
 ## 1. Deployment findings
 
-### 1.1 `scripts/install.sh`'s discovery-client repo config is broken for Debian/Proxmox — BUG
-`install.sh` hardcodes `distro=debian` (falling back to `bookworm` if
-`VERSION_CODENAME` is unset) when building the discovery-client apt repo URL. Live
-result: the `debian`-flavored repo path at
-`dl.lightbitslabs.com/public/discovery-client/deb/debian/...` **exists but is
-genuinely empty** (0-byte `Packages`/`Packages.gz` for both `bookworm` and
-`bullseye`) — `apt-get update` succeeds, `apt-get install discovery-client` fails
-with `Unable to locate package`, and today that failure is silently swallowed by
-the install script's `|| echo WARNING ...` wrapper.
+### 1.1 `scripts/install.sh`'s discovery-client repo config was broken for Debian/Proxmox — REGRESSION FOUND AND FIXED SAME SESSION
+Initial deployment hit a real bug: `install.sh` hardcoded `distro=debian`
+(falling back to `bookworm` if `VERSION_CODENAME` is unset) when building the
+discovery-client apt repo URL. Live result at the time: the `debian`-flavored
+repo path at `dl.lightbitslabs.com/public/discovery-client/deb/debian/...`
+**existed but was genuinely empty** (0-byte `Packages`/`Packages.gz` for both
+`bookworm` and `bullseye`) — `apt-get update` succeeded, `apt-get install
+discovery-client` failed with `Unable to locate package`, and that failure was
+silently swallowed by the install script's `|| echo WARNING ...` wrapper.
 
 The package **is** published, but only under `distro=ubuntu` (any codename —
 `xenial` through `noble` all resolve to the same `.el8`-origin alien-converted
 `.deb`, confirmed via direct `Packages` file fetch). Since Proxmox VE *is* a
-Debian derivative, `scripts/install.sh` needs to request the `ubuntu` repo path
-even on native Debian/PVE hosts, e.g.:
-```bash
-distro=ubuntu
-codename=jammy   # any published codename works; the artifact is identical
-```
-**This must be fixed before merge** — as written, the install script's
-discovery-client step is a silent no-op on every real Proxmox host, which is the
-plugin's only supported deployment target.
+Debian derivative, this needed `scripts/install.sh` to request the `ubuntu`
+repo path even on native Debian/PVE hosts.
+
+**Fixed same session** — `install.sh` now uses `distro=ubuntu`,
+`codename=jammy` (any published codename works; the artifact is identical).
+**Re-validated live** immediately after the fix: `apt-get install
+discovery-client` succeeded, the service started cleanly, and every
+subsequent test in this document (§2 onward) ran against that corrected
+install.
 
 ### 1.2 Deployment otherwise clean
 - `LightbitsPlugin.pm` from this branch: `perl -c` OK on the target host.
@@ -173,8 +173,8 @@ only *new* seed-file changes would have been missed while it was down.
 ---
 
 ## 6. Open items for follow-up
-1. **Fix `scripts/install.sh`'s discovery-client repo distro/codename** (§1.1) —
-   blocks the whole feature on real Proxmox hosts today. Should block merge.
+1. ~~Fix `scripts/install.sh`'s discovery-client repo distro/codename~~ — fixed
+   same session, see §1.1.
 2. **Six-node (1 spare) lab test** needed to properly answer "does
    discovery-client auto-pick-up a replica rebuilt onto a previously-unlisted
    node" (§4.2) — the actual trigger for that (`lbcli replace node`) couldn't
@@ -183,3 +183,25 @@ only *new* seed-file changes would have been missed while it was down.
    `_api`'s failure message (§3).
 4. Findings #1 (ACL-on-activate) and #2 (TLS verification) remain unimplemented
    and were not in scope for this branch's e2e — untouched by this pass.
+
+## 7. Post-review fixes (CodeRabbit, PR #19)
+Two correctness issues raised on the PR were fixed after this e2e round, covered
+by new/extended unit tests, and (the per-storeid one) re-validated live:
+- **`_api` no longer retries a non-idempotent mutation (POST) across
+  endpoints on a 5xx** — only GET/HEAD are retried now. A 5xx can arrive after
+  a POST (`alloc_image`, snapshot create) already committed server-side (e.g.
+  a proxy timeout past a successful backend write); retrying it against a
+  different endpoint risked an orphaned/duplicate resource. Covered by a new
+  `t/api_failover.t` case; not re-exercised live (fabricating a genuine
+  "committed-then-5xx" condition safely against the real cluster isn't
+  practical — the unit-level mock is the appropriate level for this one).
+- **`deactivate_volume` now removes a storage's own `discovery-client` conf
+  file as soon as none of *that* storage's volumes are active**, instead of
+  waiting on the global (all-storages) `_nqn_still_in_use` check — the global
+  check remains, but only gates the actual subsystem-wide `nvme disconnect`.
+  Previously, storage A's conf file lingered indefinitely as long as any
+  other storage sharing the same cluster/subsystem (e.g. storage B) still had
+  an active volume. **Re-validated live** on `pmx9-rack79`: with `lb-storage`
+  (VM100) and a second temporary storage both active on the same subsystem,
+  deactivating the temporary storage's only volume now removes its conf file
+  immediately, while `lb-storage`'s connection and VM100 stay untouched.

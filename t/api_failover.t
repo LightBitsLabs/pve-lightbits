@@ -103,4 +103,40 @@ $err = eval { PVE::Storage::Custom::LightbitsPlugin::_api(scfg(undef), 'GET', '/
 ok( !$err, 'dies cleanly when lb_api_host is unset' );
 is( scalar(@calls), 0, 'no request attempted when lb_api_host is unset' );
 
+# ── a 5xx on a non-idempotent mutation is NOT retried against another
+#    endpoint — a 5xx can arrive after the mutation already committed
+#    server-side (e.g. a proxy timeout past a successful backend write), so
+#    retrying it elsewhere risks creating a duplicate/orphaned resource.
+#    All endpoints fail identically here so the assertion holds regardless of
+#    _api's random start index (contrast with the all-failing GET case at the
+#    top of this file, which tries every endpoint before giving up). ──────────
+for my $method (qw(POST PUT DELETE)) {
+    reset_calls();
+    %responses = map {
+        $_ => HTTP::Response->new(500, 'error', ['Client-Warning' => 'Internal response'], '')
+    } ('10.0.0.1:443', '10.0.0.2:443', '10.0.0.3:443');
+    $err = eval {
+        PVE::Storage::Custom::LightbitsPlugin::_api(
+            scfg('10.0.0.1:443,10.0.0.2:443,10.0.0.3:443'), $method, '/x',
+            $method eq 'GET' ? undef : { name => 'vol' });
+        1;
+    };
+    ok( !$err, "a 5xx on $method propagates as an error instead of retrying" );
+    is( scalar(@calls), 1, "$method is tried against exactly one endpoint, never a second" );
+}
+
+# HEAD is retried like GET (both side-effect-free) — same all-failing setup as
+# the GET case at the top of this file, just with a different method.
+reset_calls();
+%responses = map {
+    $_ => HTTP::Response->new(500, "Can't connect", ['Client-Warning' => 'Internal response'], '')
+} ('10.0.0.1:443', '10.0.0.2:443', '10.0.0.3:443');
+$err = eval {
+    PVE::Storage::Custom::LightbitsPlugin::_api(
+        scfg('10.0.0.1:443,10.0.0.2:443,10.0.0.3:443'), 'HEAD', '/x');
+    1;
+};
+ok( !$err, 'dies when every endpoint fails a HEAD request too' );
+is( scalar(@calls), 3, 'HEAD, like GET, is retried against every configured endpoint' );
+
 done_testing();

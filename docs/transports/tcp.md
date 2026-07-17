@@ -34,10 +34,10 @@ subnqn:  nqn.2016-01.com.lightbitslabs:uuid:4ec00692-4b2d-4278-8f72-0f6c290c69e8
 
 ## How the TCP connection is managed
 
-The plugin does not call `nvme connect`/`nvme disconnect` directly — it delegates to Lightbits' `discovery-client` daemon, mirroring how Lightbits' own OpenStack (Cinder/os-brick) integration manages connections:
+The plugin delegates `nvme connect` to Lightbits' `discovery-client` daemon, mirroring how Lightbits' own OpenStack (Cinder/os-brick) integration manages connections, but still runs `nvme disconnect` itself:
 
-- **VM start (`activate_volume`)** - writes `/etc/discovery-client/discovery.d/lightbits-<storeid>.conf` (one `-t tcp -a <host> -s 8009 -q <hostnqn> -n <subsys_nqn>` line per `lb_nvme_host` entry) if no connection to the subsystem exists yet. `discovery-client` watches that directory and connects every listed data node itself. Multiple volumes on the same subsystem share the resulting connections.
-- **VM stop (`deactivate_volume`)** - removes this storage's conf file and calls `nvme disconnect -n <subsys_nqn>` only when the last active volume on that subsystem is deactivated, avoiding disruption to other running VMs. The explicit disconnect stays necessary because `discovery-client` does not proactively tear down connections on its own (unless the cluster has `ctrlLossTMO` configured, LightOS 3.19.1+).
+- **VM start (`activate_volume`)** - writes (or rewrites) `/etc/discovery-client/discovery.d/lightbits-<storeid>.conf` (one `-t tcp -a <host> -s 8009 -q <hostnqn> -n <subsys_nqn>` line per `lb_nvme_host` entry) whenever this volume isn't already active on this host — not only when no connection to the subsystem exists yet. `discovery-client` watches that directory and connects every listed data node itself. Multiple volumes on the same subsystem share the resulting connections.
+- **VM stop (`deactivate_volume`)** - removes this storage's own conf file once none of its own volumes are still active, and directly runs `nvme disconnect -n <subsys_nqn>` once the final active volume for that subsystem (across every storage on this host) is deactivated, avoiding disruption to other running VMs. The explicit disconnect stays necessary because `discovery-client` does not proactively tear down connections on its own (unless the cluster has `ctrlLossTMO` configured, LightOS 3.19.1+).
 
 ## Verifying connectivity
 
