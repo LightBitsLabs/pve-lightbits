@@ -781,7 +781,7 @@ sub _ensure_host_acl {
 
     push @values, $host_nqn;
     _api($scfg, 'PUT', "/api/v2/volumes/$uuid?projectName=$project",
-        { acl => { values => \@values } });
+        { projectName => $project, acl => { values => \@values } });
 }
 
 sub activate_storage {

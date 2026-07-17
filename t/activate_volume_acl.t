@@ -42,6 +42,8 @@ my $uuid    = 'feedface-0000-4000-8000-000000000abc';
     is( $puts[0]{method}, 'PUT', 'uses PUT to update the volume' );
     is( $puts[0]{path}, "/api/v2/volumes/$uuid?projectName=$project",
         'PUT targets the project-scoped volume UUID endpoint' );
+    is( $puts[0]{body}{projectName}, $project,
+        'PUT body carries projectName (the API rejects a PUT without it)' );
     is_deeply( $puts[0]{body}{acl}{values}, ['nqn.other-host', 'nqn.host.local'],
         'PUT body keeps the existing ACL entry and appends this host, additively' );
 }
