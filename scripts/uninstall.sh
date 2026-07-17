@@ -7,6 +7,7 @@ set -euo pipefail
 
 PLUGIN_DST="/usr/share/perl5/PVE/Storage/Custom/LightbitsPlugin.pm"
 STORAGE_CFG="/etc/pve/storage.cfg"
+DSC_CONF_DIR="/etc/discovery-client/discovery.d"
 FORCE=0
 
 for arg in "$@"; do
@@ -37,7 +38,7 @@ if [[ ${#LB_IDS[@]} -gt 0 ]]; then
         echo "  Or run:  $0 --force  to remove them automatically." >&2
         exit 1
     else
-        echo "[0/2] Removing lightbits storage entries (--force)..."
+        echo "[0/3] Removing lightbits storage entries (--force)..."
         for id in "${LB_IDS[@]}"; do
             pvesm remove "$id"
             echo "      -> Removed storage '$id'."
@@ -45,7 +46,26 @@ if [[ ${#LB_IDS[@]} -gt 0 ]]; then
     fi
 fi
 
-echo "[1/2] Removing plugin file..."
+# By this point no lightbits storage entries remain in $STORAGE_CFG (the
+# non-force branch above exits before here otherwise), so it's always safe to
+# sweep every lightbits discovery-client config regardless of whether this
+# script did the `pvesm remove` itself just now or the operator did it
+# manually beforehand per the error message above — either path left this
+# step un-run before, orphaning the config file.
+echo "[1/3] Removing discovery-client config files..."
+shopt -s nullglob
+DSC_CONFS=("$DSC_CONF_DIR"/lightbits-*.conf)
+shopt -u nullglob
+if [[ ${#DSC_CONFS[@]} -gt 0 ]]; then
+    for conf in "${DSC_CONFS[@]}"; do
+        rm -f "$conf"
+        echo "      -> Removed $conf"
+    done
+else
+    echo "      -> None present, skipping."
+fi
+
+echo "[2/3] Removing plugin file..."
 if [[ -f "$PLUGIN_DST" ]]; then
     rm -f "$PLUGIN_DST"
     echo "      -> Removed $PLUGIN_DST"
@@ -53,7 +73,7 @@ else
     echo "      -> Not present, skipping."
 fi
 
-echo "[2/2] Restarting PVE services..."
+echo "[3/3] Restarting PVE services..."
 systemctl restart pvedaemon pvestatd
 echo "      -> Done."
 

@@ -18,29 +18,61 @@ my $SYMLINK_DIR = '/dev/lightbits';
 
 # ── Lightbits REST API helper ─────────────────────────────────────────────────
 
+# Parse lb_api_host — one or more comma-separated "host:port" (or bare host)
+# API endpoints — into a list of trimmed strings used directly in request URLs.
+sub _api_endpoints {
+    my ($spec) = @_;
+    my @eps;
+    for my $e (split /,/, ($spec // '')) {
+        $e =~ s/^\s+|\s+$//g;
+        push @eps, $e if length $e;
+    }
+    return @eps;
+}
+
+# lb_api_host may list several cluster management nodes for failover (mirrors
+# Lightbits' own Cinder driver's lightos_api_address ListOpt + round-robin).
+# Each call picks its own random start index — there's no long-lived process
+# here to hold one across calls the way Cinder does — and cycles through every
+# configured endpoint on a transport failure or 5xx before giving up. A 4xx is
+# a definitive answer from a healthy node (every endpoint fronts the same
+# cluster state) and is not retried against another one.
 sub _api {
     my ($scfg, $method, $path, $body, %opts) = @_;
+
+    my @endpoints = _api_endpoints($scfg->{lb_api_host});
+    die "lb_api_host is not configured\n" unless @endpoints;
 
     my $ua = LWP::UserAgent->new(
         ssl_opts => { verify_hostname => 0, SSL_verify_mode => 0 },
         timeout  => $opts{timeout} // 15,
     );
 
-    my $url = "https://$scfg->{lb_api_host}$path";
-    my $req = HTTP::Request->new($method => $url);
-    $req->header('Authorization' => "Bearer $scfg->{lb_jwt}");
+    my $start = int(rand(scalar @endpoints));
+    my $last_err;
+    for my $i (0 .. $#endpoints) {
+        my $host = $endpoints[($start + $i) % @endpoints];
+        my $req  = HTTP::Request->new($method => "https://$host$path");
+        $req->header('Authorization' => "Bearer $scfg->{lb_jwt}");
 
-    if ($body) {
-        $req->header('Content-Type' => 'application/json');
-        $req->content(encode_json($body));
+        if ($body) {
+            $req->header('Content-Type' => 'application/json');
+            $req->content(encode_json($body));
+        }
+
+        my $res = $ua->request($req);
+        return {} if $res->code == 404;
+        if ($res->is_success) {
+            return {} if !$res->content || $res->content eq '{}';
+            return decode_json($res->content);
+        }
+
+        $last_err = "Lightbits API $method $path failed via $host: "
+            . $res->status_line . " — " . $res->content . "\n";
+        die $last_err
+            unless $res->code >= 500 || ($res->header('Client-Warning') // '') eq 'Internal response';
     }
-
-    my $res = $ua->request($req);
-    return {} if $res->code == 404 || !$res->content || $res->content eq '{}';
-    die "Lightbits API $method $path failed: " . $res->status_line . " — " . $res->content . "\n"
-        unless $res->is_success;
-
-    return decode_json($res->content);
+    die $last_err;
 }
 
 sub _project    { return $_[0]->{lb_project} // 'default'; }
@@ -84,6 +116,74 @@ sub _nvme_endpoints {
     return @eps;
 }
 
+# ── discovery-client integration ──────────────────────────────────────────────
+#
+# We don't run `nvme connect` ourselves. Instead we seed Lightbits'
+# discovery-client daemon (must be installed/running on this host — see
+# scripts/install.sh) with this cluster's discovery endpoints, and it owns the
+# actual connecting. This mirrors Lightbits' own os-brick connector
+# (dsc_connect_volume()/move_dsc_file()): unlike a static per-connect loop,
+# discovery-client keeps itself in sync as cluster nodes are added later, with
+# no config change on this host. It does NOT proactively remove connections for
+# *removed* nodes (they go stale) unless the cluster has `ctrlLossTMO`
+# configured (LightOS 3.19.1+) — that's why deactivate_volume below still runs
+# an explicit `nvme disconnect`.
+
+# Overridable in tests. $DSC_ROOT_DIR is discovery-client's own top-level config
+# dir (used only as a same-filesystem staging area for the atomic rename below,
+# never written into directly); $DSC_CONF_DIR is the directory it watches.
+our $DSC_ROOT_DIR = '/etc/discovery-client';
+our $DSC_CONF_DIR = '/etc/discovery-client/discovery.d';
+
+# LightOS' NVMe-oF discovery service port. Fixed by convention (distinct from
+# the I/O port carried in lb_nvme_host) — every entry researched for this
+# plugin uses 8009, so it is not user-configurable.
+my $DSC_DISCOVERY_PORT = 8009;
+
+sub _dsc_conf_path {
+    my ($storeid) = @_;
+    return "$DSC_CONF_DIR/lightbits-$storeid.conf";
+}
+
+# One "-t tcp -a <host> -s 8009 -q <hostnqn> -n <subsysnqn>" line per configured
+# lb_nvme_host endpoint (only the host is used — discovery always happens on
+# the fixed discovery port above, not whatever I/O port that entry carries).
+sub _dsc_conf_lines {
+    my ($scfg, $host_nqn, $subsys_nqn) = @_;
+    my @lines;
+    for my $ep (_nvme_endpoints($scfg->{lb_nvme_host})) {
+        my ($host) = @$ep;
+        push @lines, "-t tcp -a $host -s $DSC_DISCOVERY_PORT -q $host_nqn -n $subsys_nqn";
+    }
+    return @lines;
+}
+
+# Atomically create/replace this storage's discovery-client config file. The
+# temp file is written in $DSC_ROOT_DIR — outside the watched directory — and
+# moved into place with rename(2), a single atomic filesystem operation, so
+# discovery-client (which watches $DSC_CONF_DIR via inotify) only ever observes
+# a complete file and never a partially-written one.
+sub _write_dsc_conf {
+    my ($storeid, $scfg, $host_nqn, $subsys_nqn) = @_;
+    my @lines = _dsc_conf_lines($scfg, $host_nqn, $subsys_nqn);
+    return unless @lines;   # nothing configured in lb_nvme_host; nothing to seed
+
+    make_path($DSC_ROOT_DIR);
+    make_path($DSC_CONF_DIR);
+    my $final = _dsc_conf_path($storeid);
+    my $tmp   = "$DSC_ROOT_DIR/.lightbits-$storeid.conf.tmp.$$";
+    open(my $fh, '>', $tmp) or die "Cannot write $tmp: $!\n";
+    print $fh "$_\n" for @lines;
+    close($fh) or die "Cannot write $tmp: $!\n";
+    rename($tmp, $final) or die "Cannot rename $tmp -> $final: $!\n";
+}
+
+sub _remove_dsc_conf {
+    my ($storeid) = @_;
+    my $f = _dsc_conf_path($storeid);
+    unlink $f if -f $f;
+}
+
 # Read a single trimmed line from a sysfs file, or undef if unreadable.
 sub _read_sysfs {
     my ($f) = @_;
@@ -93,26 +193,6 @@ sub _read_sysfs {
     return undef unless defined $v;
     chomp $v;
     return $v;
-}
-
-# host:port endpoints already connected as paths for this subsystem NQN, so
-# activate_volume only connects the ones that are missing (and avoids nvme-cli
-# "already connected" errors). Keyed from each controller's sysfs address.
-sub _connected_endpoints {
-    my ($subsys_nqn) = @_;
-    my %seen;
-    return \%seen unless -d '/sys/class/nvme';
-    opendir(my $dh, '/sys/class/nvme') or return \%seen;
-    for my $ctl (readdir $dh) {
-        next unless $ctl =~ /^(nvme\d+)$/;
-        my $safe = $1;
-        my $nqn = _read_sysfs("/sys/class/nvme/$safe/subsysnqn");
-        next unless defined $nqn && $nqn eq $subsys_nqn;
-        my $addr = _read_sysfs("/sys/class/nvme/$safe/address") // '';
-        $seen{"$1:$2"} = 1 if $addr =~ /traddr=([^,\s]+).*?trsvcid=(\d+)/;
-    }
-    closedir($dh);
-    return \%seen;
 }
 
 sub _is_connected {
@@ -347,7 +427,10 @@ sub plugindata {
 sub properties {
     return {
         lb_api_host => {
-            description => "Lightbits API endpoint (host:port)",
+            description => "Lightbits API endpoint(s): a host:port, or a comma-separated "
+                . "list of cluster management nodes for failover (e.g. "
+                . "192.168.1.1:443,192.168.1.2:443). Listing more than one node means the "
+                . "plugin can still reach the cluster's API if any single node is down.",
             type        => 'string',
         },
         lb_jwt => {
@@ -359,7 +442,11 @@ sub properties {
             type        => 'string',
         },
         lb_nvme_host => {
-            description => "Lightbits NVMe-oF endpoint (host:port, e.g. 192.168.1.1:4420)",
+            description => "Lightbits data-node address(es) used to seed discovery-client: "
+                . "a host:port, or a comma-separated list (e.g. "
+                . "192.168.1.1:4420,192.168.1.2:4420). List every data node on a "
+                . "multi-node cluster — discovery-client then keeps itself in sync as "
+                . "nodes are added or removed.",
             type        => 'string',
         },
         lb_subsys_nqn => {
@@ -385,10 +472,10 @@ sub properties {
 
 sub options {
     return {
-        lb_api_host   => { fixed    => 1 },
-        lb_jwt        => { fixed    => 1 },
+        lb_api_host   => {},
+        lb_jwt        => {},
         lb_project    => { optional => 1 },
-        lb_nvme_host  => { fixed    => 1 },
+        lb_nvme_host  => {},
         lb_subsys_nqn => { fixed => 1, optional => 1 },
         lb_owner_id   => { optional => 1 },
         lb_replica_count => { optional => 1 },
@@ -693,32 +780,14 @@ sub activate_volume {
     my $vol  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
     my $nsid = $vol->{nsid} or die "Cannot determine NSID for volume $uuid\n";
 
-    # Connect every configured endpoint that isn't already a path for this
-    # subsystem. lb_nvme_host may be a comma-separated host:port list; connecting
-    # to all data nodes ensures the volume's ANA-optimized path is present on a
+    # Seed discovery-client with this cluster's discovery endpoints instead of
+    # driving `nvme connect` ourselves (see the "discovery-client integration"
+    # note above _dsc_conf_path). discovery-client then connects every data
+    # node itself — ensuring the volume's ANA-optimized path is present on a
     # multi-node cluster (a single connection can land on a non-optimized path,
-    # leaving the namespace inaccessible) and gives redundancy for node failover.
-    # We gate per endpoint, not per subsystem, so a path that failed to connect
-    # the first time is retried on a later activation instead of leaving the
-    # volume permanently single-path. Native NVMe multipath presents the paths
-    # as one device.
-    my $connected = _connected_endpoints($subsys_nqn);
-    for my $ep (_nvme_endpoints($scfg->{lb_nvme_host})) {
-        my ($nvme_host, $nvme_port) = @$ep;
-        next if $connected->{"$nvme_host:$nvme_port"};
-        eval {
-            run_command(['nvme', 'connect',
-                '-t', 'tcp',
-                '-a', $nvme_host,
-                '-s', $nvme_port,
-                '-n', $subsys_nqn,
-                '--keep-alive-tmo=30',
-                '--reconnect-delay=10',
-                '--ctrl-loss-tmo=-1',
-            ]);
-        };
-        warn "Lightbits: nvme connect to $nvme_host:$nvme_port failed: $@\n" if $@;
-    }
+    # leaving the namespace inaccessible) — and keeps that current as nodes are
+    # added later, unlike a one-shot connect loop.
+    _write_dsc_conf($storeid, $scfg, _host_nqn(), $subsys_nqn);
 
     # Wait for a path to the subsystem to come up.
     for my $attempt (1..30) {
@@ -733,7 +802,11 @@ sub activate_volume {
         last if $dev;
         sleep 1;
     }
-    die "Block device for volume $uuid (nsid=$nsid) did not appear\n" unless $dev;
+    die "Block device for volume $uuid (nsid=$nsid) did not appear. Check that "
+        . "discovery-client is installed and running (systemctl status "
+        . "discovery-client) and that " . _dsc_conf_path($storeid) . " exists; "
+        . "also verify this host's NQN is present in the volume's ACL.\n"
+        unless $dev;
 
     make_path("$SYMLINK_DIR/$storeid");
     symlink($dev, $link) or die "Cannot create symlink $link -> $dev: $!\n";
@@ -767,12 +840,19 @@ sub deactivate_volume {
 
     unlink $link if -l $link;
 
-    # Disconnect the subsystem only when no volume of ANY storage on this host
-    # still maps it — checked from local symlinks, not the API. `nvme disconnect`
-    # is subsystem-wide (drops every path/controller for the NQN), so a per-storid
+    # Tear down only when no volume of ANY storage on this host still maps this
+    # subsystem — checked from local symlinks, not the API. `nvme disconnect` is
+    # subsystem-wide (drops every path/controller for the NQN), so a per-storid
     # or API-derived check could tear down paths still in use by another storage
     # that shares the same cluster, or fire on a transient API error.
     unless (_nqn_still_in_use($subsys_nqn)) {
+        # Remove our discovery-client seed first...
+        _remove_dsc_conf($storeid);
+        # ...and still explicitly disconnect: discovery-client does not
+        # proactively tear down connections on its own (see the "discovery-client
+        # integration" note above _dsc_conf_path), so without this the subsystem
+        # would stay connected indefinitely after the last volume using it goes
+        # away.
         run_command(['nvme', 'disconnect', '-n', $subsys_nqn])
             if _is_connected($subsys_nqn);
     }
