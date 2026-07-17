@@ -767,6 +767,23 @@ sub path {
 
 # ── Activate / deactivate ─────────────────────────────────────────────────────
 
+# Idempotently, additively grant this host's NQN access to a volume. $vol is
+# the already-fetched GET response, so this costs no extra API call in the
+# common case (host already ACL'd). Additive — never removes an existing
+# entry — so a volume with several hosts activated concurrently (shared=1,
+# or a migration mid-flight) keeps every host's access; pruning stale entries
+# is a separate, not-yet-implemented concern.
+sub _ensure_host_acl {
+    my ($scfg, $project, $uuid, $vol) = @_;
+    my $host_nqn = _host_nqn();
+    my @values   = @{ $vol->{acl}{values} // [] };
+    return if grep { $_ eq $host_nqn } @values;
+
+    push @values, $host_nqn;
+    _api($scfg, 'PUT', "/api/v2/volumes/$uuid?projectName=$project",
+        { acl => { values => \@values } });
+}
+
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
     make_path("$SYMLINK_DIR/$storeid");
@@ -792,6 +809,12 @@ sub activate_volume {
     # Fetch volume metadata
     my $vol  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
     my $nsid = $vol->{nsid} or die "Cannot determine NSID for volume $uuid\n";
+
+    # Grant this host access before waiting for its device: alloc_image only
+    # ACLs the creating host, so a volume activated on a different host
+    # (offline migration, HA failover, or shared=1 multi-node access) would
+    # otherwise never see its namespace and the wait below would time out.
+    _ensure_host_acl($scfg, $project, $uuid, $vol);
 
     # Seed discovery-client with this cluster's discovery endpoints instead of
     # driving `nvme connect` ourselves (see the "discovery-client integration"
