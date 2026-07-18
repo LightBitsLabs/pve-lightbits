@@ -76,6 +76,8 @@ $err = eval {
 };
 ok( !$err, 'single failing endpoint dies' );
 is( scalar(@calls), 1, 'exactly one attempt with a single configured endpoint' );
+like( $@, qr/\Q - \E/, 'error uses a plain ASCII " - " separator' );
+unlike( $@, qr/\N{U+2014}/, 'error contains no Unicode em-dash (mojibakes in the PVE GUI/task log)' );
 
 # ── a 4xx is definitive: not retried against other endpoints ───────────────────
 reset_calls();

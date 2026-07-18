@@ -20,7 +20,7 @@ if [[ ! -f "$STORAGE_PM" ]]; then
     exit 1
 fi
 
-echo "[1/3] Installing plugin (auto-loaded from the Custom namespace)..."
+echo "[1/4] Installing plugin (auto-loaded from the Custom namespace)..."
 mkdir -p "$CUSTOM_DIR"
 cp "$PLUGIN_SRC" "$PLUGIN_DST"
 chmod 644 "$PLUGIN_DST"
@@ -32,7 +32,7 @@ if ! command -v nvme &>/dev/null; then
     apt-get install -y nvme-cli 2>/dev/null || \
         apt-get install -y -o Dir::Etc::sourcelist=/etc/apt/sources.list \
                            -o Dir::Etc::sourceparts=/dev/null nvme-cli 2>/dev/null || \
-        echo "      WARNING: could not install nvme-cli — install it manually before use."
+        echo "      WARNING: could not install nvme-cli - install it manually before use."
 else
     echo "      -> nvme-cli already present."
 fi
@@ -48,6 +48,7 @@ echo "[3/4] Installing discovery-client (Lightbits NVMe-oF connection manager)..
 # LightbitsPlugin.pm. Best-effort, matching the nvme-cli install above: if the
 # repo setup fails (e.g. no internet access, unsupported codename), warn and
 # let the operator install it manually rather than aborting the whole install.
+DSC_INSTALL_LOG="/tmp/lb-discovery-client-install.log"
 if ! command -v discovery-client &>/dev/null; then
     if command -v apt-get &>/dev/null; then
         (
@@ -66,10 +67,10 @@ if ! command -v discovery-client &>/dev/null; then
                 > /etc/apt/sources.list.d/lightbits-discovery-client.list
             apt-get update -q
             apt-get install -y discovery-client
-        ) 2>/dev/null || echo "      WARNING: could not install discovery-client automatically — " \
-            "see https://github.com/LightBitsLabs/discovery-client for manual install steps."
+        ) >"$DSC_INSTALL_LOG" 2>&1 || echo "      WARNING: could not install discovery-client automatically - " \
+            "see $DSC_INSTALL_LOG for details, or https://github.com/LightBitsLabs/discovery-client for manual install steps."
     else
-        echo "      WARNING: no apt-get found — install discovery-client manually, see " \
+        echo "      WARNING: no apt-get found - install discovery-client manually, see " \
             "https://github.com/LightBitsLabs/discovery-client"
     fi
 else
@@ -77,13 +78,23 @@ else
 fi
 if command -v discovery-client &>/dev/null; then
     systemctl enable --now discovery-client 2>/dev/null || \
-        echo "      WARNING: discovery-client installed but could not be started — " \
+        echo "      WARNING: discovery-client installed but could not be started - " \
             "check 'systemctl status discovery-client'."
 fi
 
 echo "[4/4] Restarting PVE services..."
 systemctl restart pvedaemon pvestatd
 echo "      -> Done."
+
+echo ""
+if command -v discovery-client &>/dev/null && systemctl is-active --quiet discovery-client; then
+    echo "discovery-client: OK (installed and running)"
+else
+    echo "discovery-client: ACTION REQUIRED - not installed/running. Every volume"
+    echo "  activation depends on it; see $DSC_INSTALL_LOG (if present) or"
+    echo "  https://github.com/LightBitsLabs/discovery-client for manual install steps,"
+    echo "  then 'systemctl enable --now discovery-client'."
+fi
 
 echo ""
 echo "Installation complete. The 'lightbits' storage type is now available."

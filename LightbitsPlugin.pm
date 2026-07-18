@@ -74,7 +74,7 @@ sub _api {
         }
 
         $last_err = "Lightbits API $method $path failed via $host: "
-            . $res->status_line . " — " . $res->content . "\n";
+            . $res->status_line . " - " . $res->content . "\n";
         my $retryable_method = $method =~ /^(?:GET|HEAD)$/;
         die $last_err unless $retryable_method
             && ($res->code >= 500 || ($res->header('Client-Warning') // '') eq 'Internal response');
@@ -455,7 +455,7 @@ sub properties {
             description => "Lightbits data-node address(es) used to seed discovery-client: "
                 . "a host:port, or a comma-separated list (e.g. "
                 . "192.168.1.1:4420,192.168.1.2:4420). List every data node on a "
-                . "multi-node cluster — discovery-client then discovers nodes added to "
+                . "multi-node cluster - discovery-client then discovers nodes added to "
                 . "the cluster later on its own, but does not proactively drop the "
                 . "connection to a node removed from this list; shrinking it only takes "
                 . "full effect once the connection is cleared by this storage's own "
