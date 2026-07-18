@@ -49,10 +49,15 @@ my $err = eval {
         scfg('10.0.0.1:443,10.0.0.2:443,10.0.0.3:443'), 'GET', '/x');
     1;
 };
+my $all_fail_msg = $@;
 ok( !$err, 'dies when every endpoint fails' );
 is( scalar(@calls), 3, 'every configured endpoint was tried exactly once' );
 is_deeply( [ sort @calls ], ['10.0.0.1:443', '10.0.0.2:443', '10.0.0.3:443'],
     'the three endpoints tried are exactly the configured ones' );
+for my $ep ('10.0.0.1:443', '10.0.0.2:443', '10.0.0.3:443') {
+    like( $all_fail_msg, qr/\Q$ep\E/,
+        "final error message names $ep, not just the last endpoint tried" );
+}
 
 # ── one healthy endpoint among failing ones -> succeeds ────────────────────────
 reset_calls();
