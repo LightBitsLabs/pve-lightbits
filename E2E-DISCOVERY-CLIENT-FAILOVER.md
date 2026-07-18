@@ -206,3 +206,93 @@ by new/extended unit tests, and (the per-storeid one) re-validated live:
   (VM100) and a second temporary storage both active on the same subsystem,
   deactivating the temporary storage's only volume now removes its conf file
   immediately, while `lb-storage`'s connection and VM100 stay untouched.
+
+---
+
+## 8. Rainy-day round 2 (2026-07-18)
+
+Follow-up destructive testing against the same lab/cluster, going beyond round 1's
+single/double node-down cases.
+
+### 8.1 Hard network partition vs. a graceful service stop
+`iptables DROP` of all traffic from the PVE host to one data node (server04),
+rather than stopping any service on the node itself. Result: the cluster's own
+view of that node stayed `Active` throughout (it's genuinely healthy — only
+unreachable from this one client), unlike a `node-manager` stop, which the
+whole cluster marks `Inactive`. On the initiator side, the kernel controller
+went `connecting` after the `keep-alive-tmo` window with **`failed to connect
+socket: -110` (ETIMEDOUT)** — a distinct signature from the `-111`
+(ECONNREFUSED) seen for a stopped service in round 1, useful for an operator
+distinguishing "network path is down" from "nothing is listening." I/O
+continued fine via the other 4 paths. Unblocking recovered the path
+automatically, no intervention needed.
+
+### 8.2 Pure control-plane-only failure
+Stopped only `api-service` on a node (leaving `node-manager`/`duroslight`
+running) — the inverse of round 1's finding that `node-manager` down takes
+the data path with it. Confirmed: the data path was completely unaffected
+(all 5 controllers stayed `live`), and REST failover handled the now-refused
+API endpoint with no added latency penalty (a refused connection fails fast,
+unlike a silently-dropped one, which costs the full connect-timeout per hit —
+see round 1 §3). Restarting `api-service` restored it immediately.
+
+### 8.3 etcd single-member failure (quorum resilience)
+The cluster runs a 5-member etcd (quorum 3). Stopped etcd on one node:
+cluster stayed fully operational — node states, REST API, and even a fresh
+volume **create** (a genuine consensus-requiring write) all succeeded
+transparently. Restarting etcd rejoined it cleanly (`member list` showed all
+5 again).
+
+### 8.4 Multi-VM stress + concurrent activate/deactivate race
+Ran 5 VMs concurrently on `lb-storage` (plus VM100 = 6 active volumes), then
+failed a node: all 6 volumes' I/O kept working via multipath simultaneously,
+not just a single test volume. Then stopped all 5 test VMs **in parallel**
+(truly concurrent `qm stop`, backgrounded together) while VM100 stayed
+running, and separately started all 5 back up concurrently — both rounds
+completed cleanly with no incorrect subsystem disconnect and no errors.
+Caveat: this is a probabilistic race (the TOCTOU concern noted as a low-severity
+polish item), so a clean run here is a positive data point, not a proof the
+race can never happen.
+
+### 8.5 Discovery port vs. I/O port partition
+Blocked only the NVMe I/O port (4420) to one node, leaving discovery (8009)
+open. `discovery-client`'s own log showed zero new activity for the entire
+window — its persistent discovery connection to that node never noticed
+anything, because I/O reconnect is handled entirely by the kernel's own
+`--reconnect-delay`/`--ctrl-loss-tmo` logic, independent of `discovery-client`
+once the initial connect has happened. Confirms a clean separation of
+concerns between the two ports/components. Unblocking recovered normally.
+
+### 8.6 Full PVE host reboot — activation ordering
+Set `onboot=1` on a test VM and rebooted the nested PVE host cold. After
+boot: `discovery-client` started with zero cached connections, `pvedaemon`
+started ~1s later and triggered the onboot VM's `activate_volume` (writing
+its conf file), and `discovery-client` picked that up and connected within
+~4-6s via its own file-watch — fully automatic, no manual step, no race.
+VMs without `onboot` correctly stayed stopped.
+
+### 8.7 discovery-client did not reconnect every configured node after a full subsystem teardown — FINDING
+While restoring state after 8.6 (all volumes on the subsystem had gone
+through a full stop, causing the subsystem-wide disconnect, then VM100
+restarted alone), only **4 of 5** configured data nodes came back as live
+NVMe controllers. The 5th node was fully healthy and reachable (both 4420 and
+8009 open, cluster showed it `Active`), and was correctly present in
+`discovery-client`'s own conf file *and* its in-memory cache — it simply
+never got an I/O `nvme connect` issued for it. Restarting `discovery-client`
+didn't fix it — it just picked a *different* node as its own discovery-seed
+connection, still without connecting the missing one. A direct manual `nvme
+connect` to that node's data IP succeeded immediately and restored full
+5-path multipath. This looks like a `discovery-client`-side gap in its own
+mass-reconnect logic (not something in this plugin's control, since the
+plugin's own conf file was already complete and correct throughout) — worth
+flagging upstream, and worth an operator/monitoring habit of checking actual
+connected-path count against `lb_nvme_host`'s configured count after a bulk
+recovery event, rather than assuming `discovery-client` always reaches full
+parity on its own.
+
+### Cleanup
+All test VMs destroyed and confirmed gone cluster-side, all iptables rules
+flushed, all stopped services (`api-service`, `etcd`) restarted and confirmed
+rejoined, full 5-path multipath restored (via the manual connect in 8.7),
+VM100 running throughout aside from the reboot in 8.6 (restarted immediately
+after), no orphaned volumes.
