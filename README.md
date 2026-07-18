@@ -519,6 +519,7 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 
 - **No live migration**: VM live migration requires shared storage visibility on both source and destination hosts. Multi-node deployment with a shared Lightbits cluster works structurally, but the per-host ACL in `alloc_image` currently restricts volume access to the allocating host's NQN. This needs to be addressed for migration support.
 - **Self-signed TLS**: SSL hostname verification is disabled to accommodate Lightbits clusters with self-signed certificates.
+- **Internet access required during install**: `scripts/install.sh` fetches `discovery-client` from Lightbits' hosted package repository. Air-gapped/offline environments aren't supported yet — see the Roadmap below.
 
 ---
 
@@ -543,6 +544,7 @@ On the horizon:
 - Live migration support
 - Broader Proxmox feature coverage (containers, ISO, vTPM, backups)
 - Debian packaging
+- Air-gapped/offline installation support
 - and more
 
 Contributions welcome at any phase — see [CONTRIBUTING.md](CONTRIBUTING.md).
