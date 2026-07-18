@@ -48,7 +48,9 @@ echo "[3/4] Installing discovery-client (Lightbits NVMe-oF connection manager)..
 # LightbitsPlugin.pm. Best-effort, matching the nvme-cli install above: if the
 # repo setup fails (e.g. no internet access, unsupported codename), warn and
 # let the operator install it manually rather than aborting the whole install.
-DSC_INSTALL_LOG="/tmp/lb-discovery-client-install.log"
+# mktemp (not a fixed path) so a local unprivileged user can't pre-create this
+# path as a symlink and have our root-owned redirect truncate an arbitrary file.
+DSC_INSTALL_LOG=$(mktemp /tmp/lb-discovery-client-install.XXXXXX.log)
 if ! command -v discovery-client &>/dev/null; then
     if command -v apt-get &>/dev/null; then
         (
@@ -87,6 +89,11 @@ systemctl restart pvedaemon pvestatd
 echo "      -> Done."
 
 echo ""
+if command -v nvme &>/dev/null; then
+    echo "nvme-cli: OK (installed)"
+else
+    echo "nvme-cli: ACTION REQUIRED - not installed; volume activate/deactivate will fail."
+fi
 if command -v discovery-client &>/dev/null && systemctl is-active --quiet discovery-client; then
     echo "discovery-client: OK (installed and running)"
 else

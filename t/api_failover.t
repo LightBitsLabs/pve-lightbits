@@ -74,10 +74,11 @@ $err = eval {
     PVE::Storage::Custom::LightbitsPlugin::_api(scfg('10.0.0.1:443'), 'GET', '/x');
     1;
 };
+my $die_msg = $@;   # capture immediately - a later eval/assertion could clobber $@
 ok( !$err, 'single failing endpoint dies' );
 is( scalar(@calls), 1, 'exactly one attempt with a single configured endpoint' );
-like( $@, qr/\Q - \E/, 'error uses a plain ASCII " - " separator' );
-unlike( $@, qr/\N{U+2014}/, 'error contains no Unicode em-dash (mojibakes in the PVE GUI/task log)' );
+like( $die_msg, qr/\Q - \E/, 'error uses a plain ASCII " - " separator' );
+unlike( $die_msg, qr/\N{U+2014}/, 'error contains no Unicode em-dash (mojibakes in the PVE GUI/task log)' );
 
 # ── a 4xx is definitive: not retried against other endpoints ───────────────────
 reset_calls();
