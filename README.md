@@ -71,9 +71,10 @@ The plugin has two communication paths to the Lightbits cluster:
 |---|---|
 | Proxmox VE **9.x** | Tested on 9.2. Requires the PVE 9 storage API (`-blockdev`). |
 | `nvme-cli` package | Provides the `nvme` command used for connect/disconnect. Ubuntu/Debian: `apt-get install -y nvme-cli`. RHEL/Rocky: `dnf install -y nvme-cli`. |
+| [`discovery-client`](https://github.com/LightBitsLabs/discovery-client) package | Lightbits' NVMe-oF connection manager. The plugin seeds it with this cluster's discovery endpoints instead of running `nvme connect` itself, so it discovers nodes added to the cluster later on its own (removed nodes still need the plugin's own disconnect — see the note below). `scripts/install.sh` attempts to install and start it automatically, best-effort (it warns and continues rather than aborting if that fails, e.g. no internet access — install and start it manually in that case; see [Verify NVMe-oF connectivity](#verify-nvme-of-connectivity-optional-pre-check) to check its status). |
 | `nvme_tcp` kernel module | Loaded automatically by nvme-cli on modern Proxmox kernels. |
 | Perl modules | `LWP::Protocol::https` and `JSON` - both included in stock Proxmox. |
-| Network access | TCP reachability to the Lightbits host on **port 443** (REST) and **port 4420** (NVMe-oF). |
+| Network access | TCP reachability to the Lightbits host on **port 443** (REST), **port 4420** (NVMe-oF I/O), and **port 8009** (NVMe-oF discovery). |
 
 ### On the Lightbits side
 
@@ -81,14 +82,14 @@ You need to collect three values before installation:
 
 | Value | Where to find it |
 |---|---|
-| **API endpoint** | IP or hostname of any Lightbits node, port 443. Example: `192.168.10.10:443` |
+| **API endpoint(s)** | IP or hostname of one or more Lightbits nodes, port 443. Example: `192.168.10.10:443`. List every management node you want failover across as a comma-separated `lb_api_host` (e.g. `192.168.10.10:443,192.168.10.11:443`) — the plugin tries each one on a connection failure or 5xx, so the storage keeps working even if one node is down. Failover only advances to the next endpoint for these retryable failures: a 4xx is treated as a definitive answer (every endpoint fronts the same cluster state) and stops there, and mutating calls (create/update/delete) are only tried against one endpoint per call, since a 5xx from those can arrive after the request already took effect. |
 | **JWT token** | Found at `/etc/lbcli/lbcli.yml` on the cluster management node, or generated with `lbcli create jwt`. |
-| **NVMe-oF endpoint** | Same IP as API, port 4420. Example: `192.168.10.10:4420` |
+| **NVMe-oF data endpoint(s)** | Same IP(s) as the API nodes, port 4420. Example: `192.168.10.10:4420`. List **every data node** on a multi-node cluster as a comma-separated `lb_nvme_host` — this seeds `discovery-client` (see below), which then discovers nodes added to the cluster later on its own. It does **not** proactively drop the connection to a node removed from this list (see the note below) — shrinking the list only fully takes effect once this storage's own connection is cleared, on its next full deactivation. |
 | **Project name** | Optional. Default is `default`. Use a specific project to isolate Proxmox volumes. |
 
 The subsystem NQN is fetched automatically from the cluster API — you no longer need to look it up manually. If you prefer to pin it explicitly (e.g. for air-gapped environments where the API may be unreachable at connect time), you can still supply `--lb_subsys_nqn`.
 
-> **Note:** LightOS does expose a standard NVMe-oF Discovery Controller (port 8009), and Lightbits provides an official [`discovery-client`](https://github.com/LightBitsLabs/discovery-client) daemon that automates discovery and connection updates as cluster nodes are added or removed. It still needs at least one initial discovery endpoint configured, and (on LightOS versions/configs without `ctrlLossTMO` set) doesn't always prune stale controllers for removed nodes on its own. This plugin does **not** use `discovery-client`; it connects directly via `nvme connect` to the endpoint(s) listed in `lb_nvme_host`, using the NQN retrieved from the cluster API. That means **you are responsible for keeping `lb_nvme_host` in sync with cluster membership yourself** — if a data node is added or removed, update `lb_nvme_host` (see [Installation](#installation)) accordingly. This is a known limitation; depending on `discovery-client` instead of a static list is a candidate future improvement (see [GitHub Issues](https://github.com/LightBitsLabs/pve-lightbits/issues) if you'd like to track or discuss it).
+> **Note on discovery:** LightOS exposes a standard NVMe-oF Discovery Controller (port 8009), and this plugin uses Lightbits' official [`discovery-client`](https://github.com/LightBitsLabs/discovery-client) daemon to manage NVMe-oF connections rather than calling `nvme connect` itself. On volume activation, the plugin writes `lb_nvme_host`'s endpoints into a `discovery-client` config file (`/etc/discovery-client/discovery.d/lightbits-<storeid>.conf`); `discovery-client` then connects every data node and — unlike a static one-shot connect — keeps that current as cluster nodes are added later, with no config change needed on this host. It does **not** proactively remove connections for *removed* nodes on its own (they go stale) unless the cluster has `ctrlLossTMO` configured (LightOS 3.19.1+), so the plugin still runs an explicit `nvme disconnect` on the last deactivation of a subsystem.
 
 #### Getting a JWT token
 
@@ -139,11 +140,41 @@ chmod +x scripts/install.sh
 The installer:
 - Installs `LightbitsPlugin.pm` into the official third-party namespace at `/usr/share/perl5/PVE/Storage/Custom/`, where Proxmox **auto-loads** it — no patching of PVE's own files
 - Installs `nvme-cli` if not present
+- Installs and starts `discovery-client` if not present (best-effort — if the repo setup fails, e.g. no internet access, it warns and continues; install it manually before use in that case)
 - Restarts `pvedaemon` and `pvestatd`
 
 ### 3. Add the storage
 
 #### Via CLI (recommended for scripted/multi-node setups)
+
+**On a multi-node cluster, list every node's IP** in both `--lb_api_host` and
+`--lb_nvme_host` — one `host:port` per cluster node, comma-separated, for
+*every* node, not just one:
+
+- `--lb_api_host` needs every management node so the plugin can fail over
+  REST calls if any single one is down (see [On the Lightbits
+  side](#on-the-lightbits-side) above).
+- `--lb_nvme_host` needs every data node so `discovery-client` (see the [note
+  on discovery](#on-the-lightbits-side) above) can reach every node's
+  ANA-optimized path and the volume's namespace is never stuck behind a
+  connection to only part of the cluster.
+
+Leaving a node's IP out of either list means that node is invisible to the
+plugin for that purpose — it won't be tried for API failover, and its data
+path won't be seeded for discovery-client — even though the cluster itself
+knows about it.
+
+```bash
+pvesm add lightbits lb-storage \
+  --lb_api_host  192.168.10.10:443,192.168.10.11:443,192.168.10.12:443 \
+  --lb_jwt       'eyJhbGci...' \
+  --lb_nvme_host 192.168.10.10:4420,192.168.10.11:4420,192.168.10.12:4420 \
+  --lb_project   default \
+  --content      images
+```
+
+On a single-node cluster there's only one IP to give, so both options
+collapse to one endpoint each:
 
 ```bash
 pvesm add lightbits lb-storage \
@@ -156,23 +187,68 @@ pvesm add lightbits lb-storage \
 
 To create volumes with more than one replica (on a multi-node cluster), add `--lb_replica_count 2` (or `3`). It defaults to `1`, and the value must be supported by the cluster — a single-node cluster only accepts `1`.
 
-The subsystem NQN is fetched automatically from the cluster. To override it explicitly:
+The subsystem NQN is fetched automatically from the cluster. To override it explicitly (same "list every node" rule applies to `lb_api_host`/`lb_nvme_host` here too):
 
 ```bash
 pvesm add lightbits lb-storage \
-  --lb_api_host   192.168.10.10:443 \
+  --lb_api_host   192.168.10.10:443,192.168.10.11:443,192.168.10.12:443 \
   --lb_jwt        'eyJhbGci...' \
-  --lb_nvme_host  192.168.10.10:4420 \
+  --lb_nvme_host  192.168.10.10:4420,192.168.10.11:4420,192.168.10.12:4420 \
   --lb_subsys_nqn 'nqn.2016-01.com.lightbitslabs:uuid:4ec00692-4b2d-4278-8f72-0f6c290c69e8' \
   --lb_project    default \
   --content       images
 ```
+
+`lb_api_host` and `lb_nvme_host` can be updated in place at any time (e.g. after scaling the LightOS cluster — append the new node's IP to *both* options) with `pvesm set`:
+
+```bash
+pvesm set lb-storage --lb_api_host  192.168.10.10:443,192.168.10.11:443,192.168.10.12:443,192.168.10.13:443
+pvesm set lb-storage --lb_nvme_host 192.168.10.10:4420,192.168.10.11:4420,192.168.10.12:4420,192.168.10.13:4420
+```
+
+Both `pvesm set` commands update `storage.cfg` immediately, but they take effect differently for an already-active storage: `lb_api_host` changes apply to the very next REST API call, with no volume activation needed. `lb_nvme_host` changes are only picked up the next time a volume on this storage is activated (its `discovery-client` config is rewritten then, not immediately) — and *removing* an endpoint still leaves its existing connection in place until the subsystem's last active volume across every storage on this host is deactivated (see the note above).
 
 #### A note on the Web UI
 
 Third-party storage plugins are **not** listed in **Datacenter → Storage → Add** — that menu is hardcoded in the Proxmox web interface for the storage types shipped with Proxmox itself (Ceph/RBD, ZFS, NFS, …). Add the `lightbits` storage with the `pvesm` command above (or by editing `/etc/pve/storage.cfg`).
 
 Once added, the storage **does** appear in the GUI storage tree and is usable from the web UI for supported operations (for example creating/deleting VM disks and viewing capacity). Only the initial "Add Storage" wizard is CLI/config-only.
+
+---
+
+## Uninstalling
+
+```bash
+sudo ./scripts/uninstall.sh
+```
+
+If any `lightbits` storage entries still exist in `/etc/pve/storage.cfg`, the
+script refuses to proceed and lists the `pvesm remove <storeid>` command for
+each one — remove them first (or pass `--force` to have the script do it for
+you) and re-run.
+
+The uninstaller then removes, in order:
+- Every `discovery-client` config file this plugin wrote
+  (`/etc/discovery-client/discovery.d/lightbits-*.conf`) — this runs
+  unconditionally once no `lightbits` storage remains, regardless of whether
+  you removed the storage entries yourself or used `--force`, so nothing is
+  left seeded for a storage that no longer exists.
+- The plugin file itself
+  (`/usr/share/perl5/PVE/Storage/Custom/LightbitsPlugin.pm`).
+
+It then restarts `pvedaemon`/`pvestatd`.
+
+**Not removed by the uninstaller** (deliberately, since other things on the
+host may still depend on them): the `discovery-client` and `nvme-cli`
+packages, and any live NVMe-oF connections/kernel controllers — a connection
+that's still in use by another storage sharing the same subsystem is never
+torn down automatically (see [How the TCP connection is
+managed](docs/transports/tcp.md)). If you're fully decommissioning Lightbits
+access from this host, disconnect manually afterward:
+```bash
+nvme disconnect -n <subsys_nqn>
+sudo apt-get remove discovery-client nvme-cli   # optional
+```
 
 ---
 
@@ -203,13 +279,20 @@ This calls `GET /api/v2/volumes` and lists all volumes in the configured project
 
 ### Verify NVMe-oF connectivity (optional pre-check)
 
-Check that TCP port 4420 is reachable from the Proxmox host:
+Check that TCP ports 4420 (I/O) and 8009 (discovery) are reachable from the Proxmox host:
 
 ```bash
 nc -zv <lightbits-ip> 4420
+nc -zv <lightbits-ip> 8009
 ```
 
-A successful connection confirms the network path is open. The actual NVMe-oF session is established by the plugin when a VM starts, directly via `nvme connect` — this plugin does not run `nvme discover` or `discovery-client` (see the note in [On the Lightbits side](#on-the-lightbits-side)).
+Also confirm `discovery-client` is installed and running:
+
+```bash
+systemctl status discovery-client
+```
+
+A successful connection confirms the network path is open. The actual NVMe-oF session is established by `discovery-client` when a VM starts, seeded by the plugin's config file at `/etc/discovery-client/discovery.d/lightbits-<storeid>.conf` (see the note in [On the Lightbits side](#on-the-lightbits-side)).
 
 ---
 
@@ -335,10 +418,16 @@ cat /etc/nvme/hostnqn   # should print a nqn.* string
 
 ### `Block device for volume <uuid> (nsid=N) did not appear`
 
-The NVMe-oF connect succeeded but the block device didn't show up. Check:
+The NVMe-oF connect never happened or the block device didn't show up. Check:
 
 ```bash
-# Did the connect succeed?
+# Is discovery-client installed and running?
+systemctl status discovery-client
+
+# Did the plugin write a config file for this storage?
+cat /etc/discovery-client/discovery.d/lightbits-<storeid>.conf
+
+# Did discovery-client connect?
 nvme list
 
 # Are nvme modules loaded?
@@ -348,7 +437,7 @@ lsmod | grep nvme_tcp
 modprobe nvme_tcp
 ```
 
-If `nvme list` shows the device but the plugin still fails, there may be a kernel/sysfs timing issue - the plugin polls for 30 seconds; a slow cluster might need a longer timeout.
+If `nvme list` shows the device but the plugin still fails, there may be a kernel/sysfs timing issue - the plugin polls for 30 seconds; a slow cluster might need a longer timeout. If this host's NQN isn't in the volume's ACL, the connection succeeds but the namespace never appears — check `/etc/nvme/hostnqn` against the volume's ACL via the Lightbits API/`lbcli`.
 
 ### `Lightbits API ... failed: 401 Unauthorized`
 
@@ -401,13 +490,14 @@ pvesm config lb-storage | grep lb_api_host
 
 2. **`activate_volume`** - Called when a VM starts.
    - GETs the volume to retrieve its NVMe namespace ID (NSID).
-   - Calls `nvme connect -t tcp -a <host> -s <port> -n <subsys_nqn>` if not already connected.
-   - Scans `/sys/class/nvme/` to find the block device with matching NSID (the kernel names namespaces sequentially regardless of the NSID value).
+   - Writes (or rewrites) `/etc/discovery-client/discovery.d/lightbits-<storeid>.conf` (one `-t tcp -a <host> -s 8009 -q <hostnqn> -n <subsys_nqn>` line per `lb_nvme_host` entry) whenever this volume isn't already active on this host — not only when no connection exists yet — `discovery-client` (not the plugin) then performs the actual `nvme connect` against every data node.
+   - Scans `/sys/block/` to find the block device with matching NSID (the kernel names namespaces sequentially regardless of the NSID value).
    - Creates a stable symlink at `/dev/lightbits/<storeid>/<uuid>` → `/dev/nvmeXnY`.
 
 3. **`deactivate_volume`** - Called when a VM stops.
    - Removes the symlink.
-   - Lists remaining active volumes; calls `nvme disconnect` only when the last volume is deactivated (avoids disrupting other running VMs on the same subsystem).
+   - Removes this storage's own `discovery-client` config file once none of its own volumes are still active (independent of other storages sharing the same cluster).
+   - Directly calls `nvme disconnect` once the last active volume for that subsystem, across *every* storage on this host, is deactivated (discovery-client does not proactively tear down connections on its own, so this stays necessary — avoids disrupting other running VMs on the same subsystem in the meantime).
 
 4. **`free_image`** - Called when a disk is deleted.
    - DELETEs the volume via the REST API.

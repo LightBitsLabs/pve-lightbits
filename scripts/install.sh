@@ -26,7 +26,7 @@ cp "$PLUGIN_SRC" "$PLUGIN_DST"
 chmod 644 "$PLUGIN_DST"
 echo "      -> $PLUGIN_DST"
 
-echo "[2/3] Installing dependencies..."
+echo "[2/4] Installing dependencies..."
 # nvme-cli for NVMe-oF connect/disconnect
 if ! command -v nvme &>/dev/null; then
     apt-get install -y nvme-cli 2>/dev/null || \
@@ -41,7 +41,47 @@ fi
 perl -e 'use LWP::Protocol::https; use JSON;' 2>/dev/null || \
     apt-get install -y liblwp-protocol-https-perl libjson-perl 2>/dev/null || true
 
-echo "[3/3] Restarting PVE services..."
+echo "[3/4] Installing discovery-client (Lightbits NVMe-oF connection manager)..."
+# The plugin seeds discovery-client instead of running `nvme connect` itself,
+# so it can keep this host's connections in sync as cluster nodes are added or
+# removed later — see the "discovery-client integration" note in
+# LightbitsPlugin.pm. Best-effort, matching the nvme-cli install above: if the
+# repo setup fails (e.g. no internet access, unsupported codename), warn and
+# let the operator install it manually rather than aborting the whole install.
+if ! command -v discovery-client &>/dev/null; then
+    if command -v apt-get &>/dev/null; then
+        (
+            set -e
+            apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+            curl -1sLf 'https://dl.lightbitslabs.com/public/discovery-client/gpg.014E5C7FAFD89AEE.key' \
+                | gpg --dearmor > /usr/share/keyrings/lightbits-discovery-client-archive-keyring.gpg
+            # Lightbits only publishes discovery-client's .deb under the "ubuntu" repo path
+            # (confirmed live: the "debian" path exists but is an empty repo for every
+            # codename). Proxmox is a Debian derivative, but the package itself is a generic
+            # alien-converted static binary (only libc6 dependency) identical across every
+            # published ubuntu codename, so this works regardless of the host's actual distro.
+            distro=ubuntu
+            codename=jammy
+            curl -1sLf "https://dl.lightbitslabs.com/public/discovery-client/config.deb.txt?distro=${distro}&codename=${codename}" \
+                > /etc/apt/sources.list.d/lightbits-discovery-client.list
+            apt-get update -q
+            apt-get install -y discovery-client
+        ) 2>/dev/null || echo "      WARNING: could not install discovery-client automatically — " \
+            "see https://github.com/LightBitsLabs/discovery-client for manual install steps."
+    else
+        echo "      WARNING: no apt-get found — install discovery-client manually, see " \
+            "https://github.com/LightBitsLabs/discovery-client"
+    fi
+else
+    echo "      -> discovery-client already present."
+fi
+if command -v discovery-client &>/dev/null; then
+    systemctl enable --now discovery-client 2>/dev/null || \
+        echo "      WARNING: discovery-client installed but could not be started — " \
+            "check 'systemctl status discovery-client'."
+fi
+
+echo "[4/4] Restarting PVE services..."
 systemctl restart pvedaemon pvestatd
 echo "      -> Done."
 
