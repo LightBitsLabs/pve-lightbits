@@ -49,10 +49,15 @@ my $err = eval {
         scfg('10.0.0.1:443,10.0.0.2:443,10.0.0.3:443'), 'GET', '/x');
     1;
 };
+my $all_fail_msg = $@;
 ok( !$err, 'dies when every endpoint fails' );
 is( scalar(@calls), 3, 'every configured endpoint was tried exactly once' );
 is_deeply( [ sort @calls ], ['10.0.0.1:443', '10.0.0.2:443', '10.0.0.3:443'],
     'the three endpoints tried are exactly the configured ones' );
+for my $ep ('10.0.0.1:443', '10.0.0.2:443', '10.0.0.3:443') {
+    like( $all_fail_msg, qr/\Q$ep\E/,
+        "final error message names $ep, not just the last endpoint tried" );
+}
 
 # ── one healthy endpoint among failing ones -> succeeds ────────────────────────
 reset_calls();
@@ -74,8 +79,11 @@ $err = eval {
     PVE::Storage::Custom::LightbitsPlugin::_api(scfg('10.0.0.1:443'), 'GET', '/x');
     1;
 };
+my $die_msg = $@;   # capture immediately - a later eval/assertion could clobber $@
 ok( !$err, 'single failing endpoint dies' );
 is( scalar(@calls), 1, 'exactly one attempt with a single configured endpoint' );
+like( $die_msg, qr/\Q - \E/, 'error uses a plain ASCII " - " separator' );
+unlike( $die_msg, qr/\N{U+2014}/, 'error contains no Unicode em-dash (mojibakes in the PVE GUI/task log)' );
 
 # ── a 4xx is definitive: not retried against other endpoints ───────────────────
 reset_calls();
