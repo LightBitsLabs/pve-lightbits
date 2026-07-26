@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-07-26 - Tech Preview
+
+Tech Preview release. Feature-complete for the documented lifecycle (create, attach, resize, snapshot, rollback, detach, delete) and validated end-to-end on live multi-node clusters, but not yet recommended for production workloads.
+
+### Fixed
+
+- Operator-facing error strings are now plain ASCII. A Unicode em-dash in the REST API error message and in the `lb_nvme_host` property description was double-encoded by Proxmox's task-log layer, so the Proxmox GUI, `journalctl`, and task logs showed garbled bytes instead of the actual error text — hiding the real cause of a failure exactly when an operator needed it.
+- `scripts/install.sh` no longer discards the output of the `discovery-client` install step, so a failed install reports its root cause instead of failing silently. The captured output goes to a `mktemp`-generated log file rather than a fixed, predictable path.
+- Corrected a stale step counter in `scripts/install.sh` that still read `[1/3]` after the `discovery-client` step was added.
+
+### Changed
+
+- `scripts/install.sh` ends with an explicit per-component health check for `nvme-cli` and `discovery-client` (`OK` / `ACTION REQUIRED`) instead of unconditionally reporting "Installation complete."
+
+### Documentation
+
+- README: installation currently requires internet access to fetch `discovery-client` from Lightbits' hosted package repository. Air-gapped installation is on the roadmap.
+
 ## [0.9.0] - 2026-07-19 - Beta
 
 Beta pre-release.
