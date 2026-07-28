@@ -10,6 +10,61 @@ CUSTOM_DIR="/usr/share/perl5/PVE/Storage/Custom"
 PLUGIN_DST="$CUSTOM_DIR/LightbitsPlugin.pm"
 STORAGE_PM="/usr/share/perl5/PVE/Storage.pm"
 
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [-h|--help]
+
+Install the Lightbits storage plugin on this Proxmox VE node. Run once per node,
+as root. The script takes no options other than --help; everything it needs is
+either already on the host or fetched automatically.
+
+What it does:
+  1. Copies LightbitsPlugin.pm to
+     $CUSTOM_DIR/
+     Proxmox auto-loads third-party plugins from that namespace, so no PVE file
+     is patched.
+  2. Installs nvme-cli (for NVMe-oF connect/disconnect) and the Perl HTTP/JSON
+     modules, if they are missing.
+  3. Installs and starts discovery-client, Lightbits' NVMe-oF connection
+     manager, which the plugin seeds instead of running 'nvme connect' itself.
+     This step needs internet access to Lightbits' package repository; it is
+     best-effort and warns rather than aborting if it fails.
+  4. Restarts pvedaemon and pvestatd so the new plugin is picked up.
+
+It finishes with a health check for nvme-cli and discovery-client, then prints a
+'pvesm add' example. Re-running it is safe: it overwrites the plugin file and
+skips anything already present, which is how you upgrade to a newer version.
+
+Requirements:
+  - Proxmox VE 9.x (verified by the presence of $STORAGE_PM)
+  - root privileges
+
+Exit status:
+  0  plugin installed (check the health output for ACTION REQUIRED items)
+  1  not run as root, or this is not a Proxmox VE host
+  2  invalid command line
+
+To remove the plugin again, use uninstall.sh (see 'uninstall.sh --help').
+Full documentation: https://github.com/LightBitsLabs/pve-lightbits
+EOF
+}
+
+# Parsed before the root check below, so --help works as an ordinary user.
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown option '$arg'." >&2
+            echo "" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
 if [[ $EUID -ne 0 ]]; then
     echo "ERROR: This script must be run as root." >&2
     exit 1

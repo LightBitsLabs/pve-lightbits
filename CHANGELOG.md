@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `scripts/install.sh` and `scripts/uninstall.sh` accept `-h` / `--help` and print full usage: what the script does step by step, its options, requirements, exit codes, and — for the uninstaller — what it deliberately leaves in place (your Lightbits volumes and snapshots, the `nvme-cli`/`discovery-client` packages, and live NVMe-oF connections). Arguments are parsed before the root check, so `--help` works as an unprivileged user.
+- CI asserts that both scripts print usage for `-h`/`--help` and reject an unknown option with exit status 2 without writing to stdout.
+
+### Changed
+
+- Both scripts now reject unrecognised arguments with an error and exit status 2 instead of ignoring them. Previously `install.sh` ignored every argument, and `uninstall.sh` only looked for an exact `--force`, so a typo such as `--forse` was silently discarded and the script carried on in non-forcing mode while the operator believed otherwise.
+
 ## [0.9.1] - 2026-07-26 - Tech Preview
 
 Tech Preview release. Feature-complete for the documented lifecycle (create, attach, resize, snapshot, rollback, detach, delete) and validated end-to-end on live multi-node clusters, but not yet recommended for production workloads.

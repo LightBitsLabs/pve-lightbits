@@ -10,8 +10,63 @@ STORAGE_CFG="/etc/pve/storage.cfg"
 DSC_CONF_DIR="/etc/discovery-client/discovery.d"
 FORCE=0
 
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [--force] [-h|--help]
+
+Remove the Lightbits storage plugin from this Proxmox VE node. Run once per node,
+as root.
+
+Options:
+  --force      Also remove any 'lightbits' storage entries still configured in
+               $STORAGE_CFG, by running 'pvesm remove' for each.
+               Without this, the script refuses to do anything while such an
+               entry exists and prints the commands to remove them yourself.
+               This detaches the storage from Proxmox; it does NOT delete any
+               volume or snapshot on the Lightbits cluster.
+  -h, --help   Show this help and exit.
+
+What it does:
+  1. Removes this plugin's discovery-client config files
+     ($DSC_CONF_DIR/lightbits-*.conf), so
+     discovery-client stops maintaining connections for them.
+  2. Removes $PLUGIN_DST
+  3. Restarts pvedaemon and pvestatd.
+
+What it deliberately leaves alone:
+  - Volumes and snapshots on the Lightbits cluster. Nothing here touches your
+    data; delete volumes from the cluster side if you want them gone.
+  - The nvme-cli and discovery-client packages, which other software may use.
+    Remove them with apt-get if you are sure nothing else needs them.
+  - Existing NVMe-oF connections. Deactivating the storage's last volume
+    disconnects the subsystem; otherwise use 'nvme disconnect -n <nqn>'.
+
+Exit status:
+  0  plugin removed
+  1  not run as root, or lightbits storage entries still exist (without --force)
+  2  invalid command line
+
+Full documentation: https://github.com/LightBitsLabs/pve-lightbits
+EOF
+}
+
+# Parsed before the root check below, so --help works as an ordinary user.
 for arg in "$@"; do
-    [[ "$arg" == "--force" ]] && FORCE=1
+    case "$arg" in
+        --force)
+            FORCE=1
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown option '$arg'." >&2
+            echo "" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
 done
 
 if [[ $EUID -ne 0 ]]; then
