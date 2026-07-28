@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `get_identity()` now normalises the `lb_api_host` endpoint list (parse, lowercase, sort) instead of interpolating the raw configured string. Because `lb_api_host` is a free-form comma-separated list, the same cluster is routinely written differently on different nodes — a different node order, extra whitespace, or a hostname in another case — and each spelling produced a different identity, defeating the purpose of the storage API 14 feature. Entries listing a genuinely different subset of cluster nodes still differ; resolving that would require an API call, and `get_identity()` is deliberately kept a pure, non-failing function of the config.
+- `get_identity()` now normalises the `lb_api_host` endpoint list (parse, lowercase, add the implicit `:443`, sort) instead of interpolating the raw configured string. Because `lb_api_host` is a free-form comma-separated list, the same cluster is routinely written differently on different nodes — a different node order, extra whitespace, a hostname in another case, or a port left implicit — and each spelling produced a different identity, defeating the purpose of the storage API 14 feature. The port matters because the plugin always builds an `https://` URL, so `10.0.0.1` and `10.0.0.1:443` are the same endpoint; a genuinely different port is still preserved and still yields a distinct identity. Entries listing a genuinely different subset of cluster nodes still differ; resolving that would require an API call, and `get_identity()` is deliberately kept a pure, non-failing function of the config.
 
 ## [0.9.1] - 2026-07-26 - Tech Preview
 

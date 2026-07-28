@@ -406,19 +406,42 @@ sub type       { return 'lightbits'; }
 # The endpoint list is normalised before use: lb_api_host is a free-form,
 # comma-separated list of management nodes, so the *same* cluster is routinely
 # written differently on different nodes (a different order, extra whitespace,
-# or a hostname in another case). Interpolating the raw string would give those
-# entries distinct identities and defeat the point of this method, so parse it,
-# lowercase each endpoint (hostnames and IP literals are case-insensitive) and
-# sort, making the result independent of how the list was typed.
+# a hostname in another case, or a port left implicit). Interpolating the raw
+# string would give those entries distinct identities and defeat the point of
+# this method, so each endpoint is canonicalised and the list sorted, making the
+# result independent of how the list was typed.
 #
 # Two entries that list a genuinely different *subset* of the cluster's nodes
 # still differ. Resolving that would mean asking the cluster for its own UUID,
 # which we deliberately do not do: get_identity must stay a pure, non-failing
 # function of the config, and an identity that changed whenever the API was
 # unreachable would be worse than one that is merely conservative.
+
+# Canonical form of a single lb_api_host entry, for identity comparison only.
+#
+# Lowercased (hostnames and hex IPv6 literals are case-insensitive) and given an
+# explicit port, because _api always builds an https:// URL and so treats a bare
+# "10.0.0.1" and "10.0.0.1:443" as the very same endpoint. Leaving the port
+# implicit would hand those two spellings different identities.
+#
+# IPv6 literals must be bracketed to be distinguishable from host:port, the same
+# convention _nvme_endpoints uses. This is only ever used to build an identity
+# string, never to build a request URL, so it cannot affect what we connect to.
+my $DEFAULT_API_PORT = 443;
+
+sub _canonical_api_endpoint {
+    my ($ep) = @_;
+    $ep = lc $ep;
+    return $ep            if $ep =~ /^\[.+\]:\d+$/;    # [IPv6]:port
+    return "$ep:$DEFAULT_API_PORT" if $ep =~ /^\[.+\]$/;          # [IPv6]
+    return $ep            if $ep =~ /^[^\[\]:]+:\d+$/;  # host:port
+    return "$ep:$DEFAULT_API_PORT";                     # bare host
+}
+
 sub get_identity {
     my ($class, $scfg, $storeid) = @_;
-    my @endpoints = sort map { lc } _api_endpoints($scfg->{lb_api_host});
+    my @endpoints = sort map { _canonical_api_endpoint($_) }
+                        _api_endpoints($scfg->{lb_api_host});
     return 'lightbits://' . join(',', @endpoints) . '/' . _project($scfg);
 }
 

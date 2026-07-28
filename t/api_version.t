@@ -80,6 +80,37 @@ is( $class->get_identity({ lb_api_host => 'LB01:443,lb02:443' }, 'lb'),
     'lightbits://lb01:443,lb02:443/default',
     'get_identity lowercases hostnames (DNS names are case-insensitive)' );
 
+# _api always builds an https:// URL, so a bare host and the same host with an
+# explicit :443 are the very same endpoint and must not get distinct identities.
+is( $class->get_identity({ lb_api_host => '10.0.0.1' }, 'lb'),
+    $class->get_identity({ lb_api_host => '10.0.0.1:443' }, 'lb'),
+    'a bare host and an explicit :443 produce the same identity' );
+is( $class->get_identity({ lb_api_host => '10.0.0.1' }, 'lb'),
+    'lightbits://10.0.0.1:443/default',
+    'a bare host is canonicalised to the default HTTPS port' );
+is( $class->get_identity({ lb_api_host => '10.0.0.2:443,10.0.0.1' }, 'lb'),
+    'lightbits://10.0.0.1:443,10.0.0.2:443/default',
+    'a mixed bare/explicit list canonicalises then sorts' );
+
+# A non-default port is a genuinely different endpoint and must be preserved.
+is( $class->get_identity({ lb_api_host => '10.0.0.1:8443' }, 'lb'),
+    'lightbits://10.0.0.1:8443/default',
+    'an explicit non-default port is preserved' );
+isnt( $class->get_identity({ lb_api_host => '10.0.0.1' }, 'lb'),
+      $class->get_identity({ lb_api_host => '10.0.0.1:8443' }, 'lb'),
+      'a bare host does not collide with the same host on another port' );
+
+# IPv6 literals are bracketed, matching the convention _nvme_endpoints uses.
+is( $class->get_identity({ lb_api_host => '[FD00::1]' }, 'lb'),
+    $class->get_identity({ lb_api_host => '[fd00::1]:443' }, 'lb'),
+    'a bracketed IPv6 literal canonicalises port and case alike' );
+is( $class->get_identity({ lb_api_host => '[fd00::1]' }, 'lb'),
+    'lightbits://[fd00::1]:443/default',
+    'a bare bracketed IPv6 literal gains the default port' );
+is( $class->get_identity({ lb_api_host => '[fd00::1]:8443' }, 'lb'),
+    'lightbits://[fd00::1]:8443/default',
+    'an IPv6 literal keeps its explicit non-default port' );
+
 # Genuinely different clusters, or the same cluster under a different project,
 # must NOT collide.
 isnt( $class->get_identity({ lb_api_host => '10.0.0.1:443' }, 'lb'),
