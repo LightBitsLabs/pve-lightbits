@@ -31,6 +31,32 @@ sub _api_endpoints {
     return @eps;
 }
 
+# TLS options for the API client.
+#
+# Verification is OFF unless lb_ssl_verify is set, because a LightOS cluster
+# commonly serves its API with a self-signed or internal-CA certificate and
+# turning verification on by default would break every existing storage entry.
+# Turn it on where you can: every request carries the lb_jwt bearer token in an
+# Authorization header, so without verification an on-path attacker can present
+# any certificate, terminate the connection, and harvest a token that grants
+# full control of the project's volumes. lb_ca_file supplies the signing CA when
+# it is not already in the host's system trust store.
+sub _ssl_opts {
+    my ($scfg) = @_;
+
+    return { verify_hostname => 0, SSL_verify_mode => 0 }
+        unless $scfg->{lb_ssl_verify};
+
+    # SSL_verify_mode 1 is IO::Socket::SSL's SSL_VERIFY_PEER.
+    my %opts = (verify_hostname => 1, SSL_verify_mode => 1);
+    if (defined $scfg->{lb_ca_file} && length $scfg->{lb_ca_file}) {
+        my $ca = $scfg->{lb_ca_file};
+        die "lb_ca_file '$ca' is not a readable file\n" unless -r $ca;
+        $opts{SSL_ca_file} = $ca;
+    }
+    return \%opts;
+}
+
 # lb_api_host may list several cluster management nodes for failover (mirrors
 # Lightbits' own Cinder driver's lightos_api_address ListOpt + round-robin).
 # Each call picks its own random start index — there's no long-lived process
@@ -50,7 +76,7 @@ sub _api {
     die "lb_api_host is not configured\n" unless @endpoints;
 
     my $ua = LWP::UserAgent->new(
-        ssl_opts => { verify_hostname => 0, SSL_verify_mode => 0 },
+        ssl_opts => _ssl_opts($scfg),
         timeout  => $opts{timeout} // 15,
     );
 
@@ -480,6 +506,23 @@ sub properties {
             maximum     => 3,
             default     => 1,
         },
+        lb_ssl_verify => {
+            description => "Verify the Lightbits API server's TLS certificate. Off by "
+                . "default, because a cluster commonly serves its API with a self-signed "
+                . "or internal-CA certificate. Enable it wherever you can: every API "
+                . "request carries the lb_jwt bearer token, so without verification an "
+                . "on-path attacker can present any certificate and capture a token that "
+                . "grants full control of the project's volumes. Use lb_ca_file when the "
+                . "signing CA is not in the host's system trust store.",
+            type        => 'boolean',
+            default     => 0,
+        },
+        lb_ca_file => {
+            description => "Path to a PEM CA bundle used to verify the Lightbits API "
+                . "server's certificate when lb_ssl_verify is enabled. Defaults to the "
+                . "host's system trust store.",
+            type        => 'string',
+        },
     };
 }
 
@@ -492,6 +535,8 @@ sub options {
         lb_subsys_nqn => { fixed => 1, optional => 1 },
         lb_owner_id   => { optional => 1 },
         lb_replica_count => { optional => 1 },
+        lb_ssl_verify => { optional => 1 },
+        lb_ca_file    => { optional => 1 },
         content       => { optional => 1 },
         shared        => { optional => 1 },
         disable       => { optional => 1 },

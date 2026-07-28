@@ -187,6 +187,24 @@ pvesm add lightbits lb-storage \
 
 To create volumes with more than one replica (on a multi-node cluster), add `--lb_replica_count 2` (or `3`). It defaults to `1`, and the value must be supported by the cluster — a single-node cluster only accepts `1`.
 
+#### TLS verification for the API connection
+
+The plugin talks to the LightOS cluster API over HTTPS. Certificate verification is **off by default**, because a cluster commonly serves its API with a self-signed or internal-CA certificate and enabling verification unconditionally would break those deployments.
+
+Turn it on wherever your certificate chain allows. Every API request carries the `lb_jwt` bearer token in an `Authorization` header, and with verification off an on-path attacker can present any certificate, terminate the connection, and capture a token that grants full control of the project's volumes:
+
+```bash
+pvesm set lb-storage --lb_ssl_verify 1
+```
+
+If the CA that signed the cluster's certificate is not in the Proxmox host's system trust store, point the plugin at it:
+
+```bash
+pvesm set lb-storage --lb_ssl_verify 1 --lb_ca_file /etc/pve/lightbits-ca.pem
+```
+
+`lb_ca_file` is only consulted when `lb_ssl_verify` is enabled, and an unreadable path fails the API call loudly rather than silently falling back to an unverified connection.
+
 The subsystem NQN is fetched automatically from the cluster. To override it explicitly (same "list every node" rule applies to `lb_api_host`/`lb_nvme_host` here too):
 
 ```bash

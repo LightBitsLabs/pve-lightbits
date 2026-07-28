@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `lb_ssl_verify` and `lb_ca_file` storage options control TLS certificate verification for the LightOS cluster API. Previously verification was hardcoded off, so the `lb_jwt` bearer token was sent over an unauthenticated TLS connection on every API call and an on-path attacker could present any certificate and capture it. Verification remains **off by default** — a cluster commonly serves its API with a self-signed or internal-CA certificate, and enabling it unconditionally would break existing storage entries — but can now be enabled per storage with `pvesm set <storeid> --lb_ssl_verify 1`, optionally pointing `lb_ca_file` at the signing CA when it is not in the host's system trust store. An unreadable `lb_ca_file` fails the call rather than silently falling back to an unverified connection.
+
 ## [0.9.1] - 2026-07-26 - Tech Preview
 
 Tech Preview release. Feature-complete for the documented lifecycle (create, attach, resize, snapshot, rollback, detach, delete) and validated end-to-end on live multi-node clusters, but not yet recommended for production workloads.
