@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `activate_volume` now re-validates an existing `/dev/lightbits/<storeid>/<uuid>` symlink against the volume's subsystem NQN and NSID instead of trusting any block device found at that path. NVMe controller numbering is not stable across a disconnect/reconnect or path flap, so a symlink left by an earlier activation could dangle — making every later activation fail with `Cannot create symlink ...: File exists` until it was removed by hand — or, worse, resolve to a namespace that now belongs to a different volume, in which case activation reported success and handed QEMU the wrong disk. A symlink that no longer matches is replaced.
+
 ## [0.9.1] - 2026-07-26 - Tech Preview
 
 Tech Preview release. Feature-complete for the documented lifecycle (create, attach, resize, snapshot, rollback, detach, delete) and validated end-to-end on live multi-node clusters, but not yet recommended for production workloads.
