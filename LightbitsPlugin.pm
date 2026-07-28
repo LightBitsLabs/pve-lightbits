@@ -67,7 +67,15 @@ sub _api {
         }
 
         my $res = $ua->request($req);
-        return {} if $res->code == 404;
+        # A 404 is reported as an empty result so the idempotent paths can treat
+        # "already gone" as success (free_image deleting a volume that is no
+        # longer there, _delete_snapshot re-checking after a racing delete).
+        # Callers that go on to read fields out of the result need to tell an
+        # absent resource apart from an empty one and ask for undef instead;
+        # see _get_existing.
+        if ($res->code == 404) {
+            return $opts{missing_is_undef} ? undef : {};
+        }
         if ($res->is_success) {
             return {} if !$res->content || $res->content eq '{}';
             return decode_json($res->content);
@@ -80,6 +88,24 @@ sub _api {
             && ($res->code >= 500 || ($res->header('Client-Warning') // '') eq 'Internal response');
     }
     die join('', @errors);
+}
+
+# GET a resource that the caller is about to read fields out of, failing
+# immediately if the cluster says it is gone.
+#
+# _api maps a 404 to an empty hash, which is right for the idempotent delete
+# paths but wrong here: an empty hash has no `state` and no `size`, so a
+# resource deleted out of band reads as "present, just not converged yet". The
+# polling loops would spin out their full 30-60 iteration timeout before failing
+# with a misleading "did not become Available" message that sends the operator
+# looking for a cluster convergence problem, and volume_rollback_is_possible
+# would compare two zero sizes and green-light a rollback that cannot work.
+sub _get_existing {
+    my ($scfg, $path, $what, %opts) = @_;
+    my $data = _api($scfg, 'GET', $path, undef, %opts, missing_is_undef => 1);
+    die "$what no longer exists on the Lightbits cluster (deleted outside Proxmox?)\n"
+        unless defined $data;
+    return $data;
 }
 
 sub _project    { return $_[0]->{lb_project} // 'default'; }
@@ -687,7 +713,10 @@ sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
     my $project = _project($scfg);
     my $uuid    = _vol_uuid($volname);
-    my $vol     = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project", undef, timeout => $timeout // 15);
+    # Strict: a vanished volume must not be reported as a 0-byte disk, which
+    # would propagate a bogus size into the guest config.
+    my $vol     = _get_existing($scfg, "/api/v2/volumes/$uuid?projectName=$project",
+        "Volume $uuid", timeout => $timeout // 15);
     my $size    = int($vol->{size} // 0);
     my $used    = int(($vol->{statistics} // {})->{logicalUsedStorage} // 0);
     return wantarray ? ($size, 'raw', $used, undef) : $size;
@@ -739,7 +768,8 @@ sub alloc_image {
     # cryptically — when activate_volume can't find its NSID.
     my $state = '';
     for my $attempt (1..30) {
-        my $v  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+        my $v  = _get_existing($scfg, "/api/v2/volumes/$uuid?projectName=$project",
+            "Volume $vol_name ($uuid)");
         $state = $v->{state} // '';
         last if $state eq 'Available';
         die "Lightbits volume $vol_name ($uuid) creation failed on the cluster "
@@ -1012,7 +1042,8 @@ sub volume_resize {
     # assuming it on timeout.
     my ($cur, $state) = (0, '');
     for my $attempt (1..60) {
-        my $vol = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+        my $vol = _get_existing($scfg, "/api/v2/volumes/$uuid?projectName=$project",
+            "Volume $uuid");
         $cur    = int($vol->{size} // 0);
         $state  = $vol->{state} // '';
         last if $cur >= $bytes && $state eq 'Available';
@@ -1069,7 +1100,8 @@ sub volume_snapshot {
     # timeout so we never report a snapshot as taken when it never materialised.
     my $state = '';
     for my $attempt (1..30) {
-        my $s  = _api($scfg, 'GET', "/api/v2/projects/$project/snapshots/$snap_uuid");
+        my $s  = _get_existing($scfg, "/api/v2/projects/$project/snapshots/$snap_uuid",
+            "Snapshot $snap ($snap_uuid)");
         $state = $s->{state} // '';
         last if $state eq 'Available';
         die "Lightbits snapshot $snap ($snap_uuid) creation failed (state '$state')\n"
@@ -1137,8 +1169,10 @@ sub volume_rollback_is_possible {
     my $vol_uuid  = _vol_uuid($volname);
     my $snap_uuid = _snap_uuid($scfg, $project, $volname, $snap);
 
-    my $vol   = _api($scfg, 'GET', "/api/v2/volumes/$vol_uuid?projectName=$project");
-    my $sd    = _api($scfg, 'GET', "/api/v2/projects/$project/snapshots/$snap_uuid");
+    my $vol   = _get_existing($scfg, "/api/v2/volumes/$vol_uuid?projectName=$project",
+        "Volume $vol_uuid");
+    my $sd    = _get_existing($scfg, "/api/v2/projects/$project/snapshots/$snap_uuid",
+        "Snapshot '$snap' ($snap_uuid)");
     my $vsize = int($vol->{size} // 0);
     my $ssize = int($sd->{size}  // 0);
 
@@ -1173,7 +1207,8 @@ sub volume_snapshot_rollback {
     # timeout rather than assuming success.
     my $state = '';
     for my $attempt (1..60) {
-        my $v  = _api($scfg, 'GET', "/api/v2/volumes/$vol_uuid?projectName=$project");
+        my $v  = _get_existing($scfg, "/api/v2/volumes/$vol_uuid?projectName=$project",
+            "Volume $vol_uuid");
         $state = $v->{state} // '';
         last if $state eq 'Available';
         die "Lightbits volume $vol_uuid rollback to '$snap' failed (state '$state')\n"
