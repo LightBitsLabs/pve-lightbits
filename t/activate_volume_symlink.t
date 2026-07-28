@@ -71,7 +71,12 @@ my $api_calls = 0;
     *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
         my (undef, $method, $path) = @_;
         $api_calls++;
-        return { nsid => 9 } if $method eq 'GET' && $path =~ m{/api/v2/volumes/\Q$UUID\E};
+        # The ACL already contains this host, as it would after any earlier
+        # activation — otherwise the _ensure_host_acl grant (merged in from
+        # #22) adds a PUT and the fast-path call-count assertion below would
+        # measure the ACL grant instead of the symlink logic under test here.
+        return { nsid => 9, acl => { values => ['nqn.host.local'] } }
+            if $method eq 'GET' && $path =~ m{/api/v2/volumes/\Q$UUID\E};
         return {};
     };
     use warnings 'redefine';

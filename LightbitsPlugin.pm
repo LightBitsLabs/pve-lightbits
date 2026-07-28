@@ -803,6 +803,23 @@ sub path {
 
 # ── Activate / deactivate ─────────────────────────────────────────────────────
 
+# Idempotently, additively grant this host's NQN access to a volume. $vol is
+# the already-fetched GET response, so this costs no extra API call in the
+# common case (host already ACL'd). Additive — never removes an existing
+# entry — so a volume with several hosts activated concurrently (shared=1,
+# or a migration mid-flight) keeps every host's access; pruning stale entries
+# is a separate, not-yet-implemented concern.
+sub _ensure_host_acl {
+    my ($scfg, $project, $uuid, $vol) = @_;
+    my $host_nqn = _host_nqn();
+    my @values   = @{ $vol->{acl}{values} // [] };
+    return if grep { $_ eq $host_nqn } @values;
+
+    push @values, $host_nqn;
+    _api($scfg, 'PUT', "/api/v2/volumes/$uuid?projectName=$project",
+        { projectName => $project, acl => { values => \@values } });
+}
+
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
     make_path("$SYMLINK_DIR/$storeid");
@@ -828,6 +845,15 @@ sub activate_volume {
     # left over from a previous activation (see _symlink_is_current).
     my $vol  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
     my $nsid = $vol->{nsid} or die "Cannot determine NSID for volume $uuid\n";
+
+    # Grant this host access before waiting for its device: alloc_image only
+    # ACLs the creating host, so a volume activated on a different host
+    # (offline migration, HA failover, or shared=1 multi-node access) would
+    # otherwise never see its namespace and the wait below would time out.
+    # Runs before the mapped-already early return on purpose: the grant is a
+    # no-op API-wise when the host is already in the ACL, and it must not be
+    # skippable by a symlink that merely looks current.
+    _ensure_host_acl($scfg, $project, $uuid, $vol);
 
     # Already mapped on this node, and the link still points at this volume's
     # namespace: nothing to do.
