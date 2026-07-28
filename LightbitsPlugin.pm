@@ -659,6 +659,20 @@ sub volume_size_info {
 
 # ── Volume lifecycle ──────────────────────────────────────────────────────────
 
+# Best-effort removal of a volume that was created but never became usable.
+#
+# Deliberately non-fatal: the creation failure is what the operator needs to
+# see, so a cleanup problem is warned about rather than allowed to replace it
+# (dying here would swap a precise "volume entered state Failed" for a vague
+# delete error). A volume the cluster is already removing needs no DELETE.
+sub _discard_orphan_volume {
+    my ($scfg, $project, $uuid, $vol_name, $state) = @_;
+    return if defined $state && $state =~ /^(Deleting|Deleted)$/i;
+    eval { _api($scfg, 'DELETE', "/api/v2/volumes/$uuid?projectName=$project"); 1 }
+        or warn "Lightbits: could not remove unusable volume $vol_name ($uuid) after a "
+            . "failed creation; it may need to be deleted manually: $@";
+}
+
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
 
@@ -706,14 +720,25 @@ sub alloc_image {
         my $v  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
         $state = $v->{state} // '';
         last if $state eq 'Available';
+        last if $state =~ /^(Failed|Deleting|Deleted)$/i;
+        sleep 1;
+    }
+
+    if ($state ne 'Available') {
+        # The volume exists on the cluster but is unusable, and PVE only starts
+        # tracking it once we return a volid — so dying here without cleaning up
+        # strands it with nothing left to reap it. The orphan holds its name
+        # (LightOS enforces per-project name uniqueness, so a retry with the same
+        # vmid and vmgenid collides on the same disk index) and, depending on how
+        # it failed, its space.
+        _discard_orphan_volume($scfg, $project, $uuid, $vol_name, $state);
+
         die "Lightbits volume $vol_name ($uuid) creation failed on the cluster "
             . "(state '$state')\n"
             if $state =~ /^(Failed|Deleting|Deleted)$/i;
-        sleep 1;
+        die "Lightbits volume $vol_name ($uuid) did not become Available within timeout "
+            . "(last state '$state')\n";
     }
-    die "Lightbits volume $vol_name ($uuid) did not become Available within timeout "
-        . "(last state '$state')\n"
-        if $state ne 'Available';
 
     # The volid embeds the vmid so PVE can identify the owning guest (the UUID
     # remains the Lightbits volume's real identity, recovered via _vol_uuid).
