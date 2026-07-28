@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `get_identity()` now normalises the `lb_api_host` endpoint list (parse, lowercase, sort) instead of interpolating the raw configured string. Because `lb_api_host` is a free-form comma-separated list, the same cluster is routinely written differently on different nodes — a different node order, extra whitespace, or a hostname in another case — and each spelling produced a different identity, defeating the purpose of the storage API 14 feature. Entries listing a genuinely different subset of cluster nodes still differ; resolving that would require an API call, and `get_identity()` is deliberately kept a pure, non-failing function of the config.
+
 ## [0.9.1] - 2026-07-26 - Tech Preview
 
 Tech Preview release. Feature-complete for the documented lifecycle (create, attach, resize, snapshot, rollback, detach, delete) and validated end-to-end on live multi-node clusters, but not yet recommended for production workloads.

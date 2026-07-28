@@ -402,9 +402,24 @@ sub type       { return 'lightbits'; }
 # Stable identifier for the backing store (storage API 14). Two storage entries
 # pointing at the same LightOS cluster endpoint and project share an identity,
 # which lets PVE recognise the same backend across nodes.
+#
+# The endpoint list is normalised before use: lb_api_host is a free-form,
+# comma-separated list of management nodes, so the *same* cluster is routinely
+# written differently on different nodes (a different order, extra whitespace,
+# or a hostname in another case). Interpolating the raw string would give those
+# entries distinct identities and defeat the point of this method, so parse it,
+# lowercase each endpoint (hostnames and IP literals are case-insensitive) and
+# sort, making the result independent of how the list was typed.
+#
+# Two entries that list a genuinely different *subset* of the cluster's nodes
+# still differ. Resolving that would mean asking the cluster for its own UUID,
+# which we deliberately do not do: get_identity must stay a pure, non-failing
+# function of the config, and an identity that changed whenever the API was
+# unreachable would be worse than one that is merely conservative.
 sub get_identity {
     my ($class, $scfg, $storeid) = @_;
-    return "lightbits://$scfg->{lb_api_host}/" . _project($scfg);
+    my @endpoints = sort map { lc } _api_endpoints($scfg->{lb_api_host});
+    return 'lightbits://' . join(',', @endpoints) . '/' . _project($scfg);
 }
 
 sub parse_volname {

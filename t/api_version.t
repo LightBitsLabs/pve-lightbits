@@ -62,4 +62,36 @@ is( $class->get_identity({ lb_api_host => '10.0.0.2:443' }, 'lb'),
     'lightbits://10.0.0.2:443/default',
     'get_identity falls back to the default project' );
 
+# ── get_identity(): normalised so the same cluster always yields one identity ───
+# lb_api_host is a free-form comma-separated list, so the same cluster gets
+# written differently on different nodes. Those entries must still match.
+my $canonical = 'lightbits://10.0.0.1:443,10.0.0.2:443,10.0.0.3:443/default';
+for my $spec (
+    '10.0.0.1:443,10.0.0.2:443,10.0.0.3:443',       # as written
+    '10.0.0.3:443,10.0.0.1:443,10.0.0.2:443',       # different order
+    ' 10.0.0.2:443 , 10.0.0.3:443 , 10.0.0.1:443 ', # padded with whitespace
+    '10.0.0.1:443,,10.0.0.2:443,10.0.0.3:443',      # stray empty element
+) {
+    is( $class->get_identity({ lb_api_host => $spec }, 'lb'), $canonical,
+        "get_identity normalises '$spec' to a single identity" );
+}
+
+is( $class->get_identity({ lb_api_host => 'LB01:443,lb02:443' }, 'lb'),
+    'lightbits://lb01:443,lb02:443/default',
+    'get_identity lowercases hostnames (DNS names are case-insensitive)' );
+
+# Genuinely different clusters, or the same cluster under a different project,
+# must NOT collide.
+isnt( $class->get_identity({ lb_api_host => '10.0.0.1:443' }, 'lb'),
+      $class->get_identity({ lb_api_host => '10.9.9.9:443' }, 'lb'),
+      'different clusters keep different identities' );
+isnt( $class->get_identity({ lb_api_host => '10.0.0.1:443', lb_project => 'p1' }, 'lb'),
+      $class->get_identity({ lb_api_host => '10.0.0.1:443', lb_project => 'p2' }, 'lb'),
+      'the same cluster under different projects keeps different identities' );
+
+# get_identity must be a pure function of the config: no API call, no die, even
+# when lb_api_host is missing entirely.
+is( $class->get_identity({}, 'lb'), 'lightbits:///default',
+    'get_identity does not die when lb_api_host is unset' );
+
 done_testing();
