@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- `lb_jwt` is now a Proxmox **sensitive property**, so it is no longer written to `/etc/pve/storage.cfg`. That file is `root:www-data` mode `0640` and therefore readable by every process in the `www-data` group, while the token grants full control over the project's volumes. It is now stored at `/etc/pve/priv/storage/<storeid>.pw`, root-only at `0600` — the same location Proxmox's own PBS and ESXi plugins use. Setting and rotating the token is unchanged (`pvesm set <storeid> --lb_jwt '<token>'`).
+
+  **Existing storage entries keep working untouched:** a token still held in plaintext in `storage.cfg` is used as a fallback when no private file exists. Running any `pvesm set` on the storage migrates the token into the private file and removes it from `storage.cfg`. Until that happens the token remains group-readable, so migrating is worth doing deliberately — see the README for the exact commands. Note that PVE performs no automatic migration of its own, and the old value will persist in any existing backups of `storage.cfg`.
+
+  An API call with no token available now fails with an explicit "token is not available" error naming the `pvesm set` command to fix it, rather than sending an empty bearer token and surfacing an opaque HTTP 401.
+
 ## [0.9.1] - 2026-07-26 - Tech Preview
 
 Tech Preview release. Feature-complete for the documented lifecycle (create, attach, resize, snapshot, rollback, detach, delete) and validated end-to-end on live multi-node clusters, but not yet recommended for production workloads.

@@ -187,6 +187,25 @@ pvesm add lightbits lb-storage \
 
 To create volumes with more than one replica (on a multi-node cluster), add `--lb_replica_count 2` (or `3`). It defaults to `1`, and the value must be supported by the cluster — a single-node cluster only accepts `1`.
 
+#### Where the JWT is stored
+
+`lb_jwt` is declared a **sensitive property**, so Proxmox does not write it to `/etc/pve/storage.cfg`. That file is `root:www-data` mode `0640`, meaning every process in the `www-data` group can read it — including the web UI — and the JWT grants full control over the project's volumes.
+
+Instead the token is stored at `/etc/pve/priv/storage/<storeid>.pw`, mode `0600` and root-only, which is the same location Proxmox's own PBS and ESXi plugins use for their secrets. You set and rotate it exactly as before; nothing changes at the command line:
+
+```bash
+pvesm set lb-storage --lb_jwt '<new-jwt-token>'
+```
+
+**Upgrading an existing storage.** A storage entry created before this change still has its token in plaintext in `storage.cfg`, and keeps working untouched — the plugin falls back to that value when no private file exists. To move it out, run any `pvesm set` on the storage: the plugin migrates the token to the private file and removes it from `storage.cfg` as part of that update. Re-supplying the token is the most explicit way to do it:
+
+```bash
+pvesm set lb-storage --lb_jwt '<same-or-new-jwt-token>'
+grep lb_jwt /etc/pve/storage.cfg    # expect no output once migrated
+```
+
+Until you do, the token remains readable by the `www-data` group, so it is worth doing on any cluster you care about. Note the old value stays in whatever backups of `storage.cfg` you already have; rotate the token on the Lightbits side if that matters to you.
+
 The subsystem NQN is fetched automatically from the cluster. To override it explicitly (same "list every node" rule applies to `lb_api_host`/`lb_nvme_host` here too):
 
 ```bash
