@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A volume or snapshot deleted outside Proxmox is now reported as gone instead of being read as an empty resource. `_api` maps a 404 to an empty hash so idempotent deletes can treat "already gone" as success, but callers that read fields out of the result saw an empty hash as "present, just not converged yet". A volume deleted out of band mid-operation therefore made `alloc_image`, `volume_resize`, `volume_snapshot`, and `volume_snapshot_rollback` poll out their full 30-60 iteration timeout and then blame a cluster convergence problem; `volume_rollback_is_possible` compared two zero sizes and allowed a rollback that could not work; and `volume_size_info` reported the disk as 0 bytes. These paths now fail immediately with an error naming the missing resource. The idempotent delete paths (`free_image`, `_delete_snapshot`) are unchanged.
+
 ## [0.9.1] - 2026-07-26 - Tech Preview
 
 Tech Preview release. Feature-complete for the documented lifecycle (create, attach, resize, snapshot, rollback, detach, delete) and validated end-to-end on live multi-node clusters, but not yet recommended for production workloads.
