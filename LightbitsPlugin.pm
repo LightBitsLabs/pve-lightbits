@@ -55,7 +55,7 @@ sub _api {
     );
 
     my $start = int(rand(scalar @endpoints));
-    my $last_err;
+    my @errors;
     for my $i (0 .. $#endpoints) {
         my $host = $endpoints[($start + $i) % @endpoints];
         my $req  = HTTP::Request->new($method => "https://$host$path");
@@ -73,13 +73,13 @@ sub _api {
             return decode_json($res->content);
         }
 
-        $last_err = "Lightbits API $method $path failed via $host: "
-            . $res->status_line . " — " . $res->content . "\n";
+        push @errors, "Lightbits API $method $path failed via $host: "
+            . $res->status_line . " - " . $res->content . "\n";
         my $retryable_method = $method =~ /^(?:GET|HEAD)$/;
-        die $last_err unless $retryable_method
+        die $errors[-1] unless $retryable_method
             && ($res->code >= 500 || ($res->header('Client-Warning') // '') eq 'Internal response');
     }
-    die $last_err;
+    die join('', @errors);
 }
 
 sub _project    { return $_[0]->{lb_project} // 'default'; }
@@ -455,7 +455,7 @@ sub properties {
             description => "Lightbits data-node address(es) used to seed discovery-client: "
                 . "a host:port, or a comma-separated list (e.g. "
                 . "192.168.1.1:4420,192.168.1.2:4420). List every data node on a "
-                . "multi-node cluster — discovery-client then discovers nodes added to "
+                . "multi-node cluster - discovery-client then discovers nodes added to "
                 . "the cluster later on its own, but does not proactively drop the "
                 . "connection to a node removed from this list; shrinking it only takes "
                 . "full effect once the connection is cleared by this storage's own "

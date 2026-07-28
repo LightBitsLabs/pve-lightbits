@@ -20,7 +20,7 @@ if [[ ! -f "$STORAGE_PM" ]]; then
     exit 1
 fi
 
-echo "[1/3] Installing plugin (auto-loaded from the Custom namespace)..."
+echo "[1/4] Installing plugin (auto-loaded from the Custom namespace)..."
 mkdir -p "$CUSTOM_DIR"
 cp "$PLUGIN_SRC" "$PLUGIN_DST"
 chmod 644 "$PLUGIN_DST"
@@ -32,7 +32,7 @@ if ! command -v nvme &>/dev/null; then
     apt-get install -y nvme-cli 2>/dev/null || \
         apt-get install -y -o Dir::Etc::sourcelist=/etc/apt/sources.list \
                            -o Dir::Etc::sourceparts=/dev/null nvme-cli 2>/dev/null || \
-        echo "      WARNING: could not install nvme-cli — install it manually before use."
+        echo "      WARNING: could not install nvme-cli - install it manually before use."
 else
     echo "      -> nvme-cli already present."
 fi
@@ -48,13 +48,23 @@ echo "[3/4] Installing discovery-client (Lightbits NVMe-oF connection manager)..
 # LightbitsPlugin.pm. Best-effort, matching the nvme-cli install above: if the
 # repo setup fails (e.g. no internet access, unsupported codename), warn and
 # let the operator install it manually rather than aborting the whole install.
+# mktemp (not a fixed path) so a local unprivileged user can't pre-create this
+# path as a symlink and have our root-owned redirect truncate an arbitrary file.
+DSC_INSTALL_LOG=$(mktemp /tmp/lb-discovery-client-install.XXXXXX.log)
 if ! command -v discovery-client &>/dev/null; then
     if command -v apt-get &>/dev/null; then
         (
             set -e
             apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+            # Write both downloaded files to a staging temp file first and mv into
+            # place only on success, so a transient curl/gpg failure can't truncate
+            # an existing, working repo config (a plain `>` redirect opens/truncates
+            # the destination before the pipeline's success is known).
+            key_tmp=$(mktemp /usr/share/keyrings/.lightbits-discovery-client-keyring.XXXXXX)
+            source_tmp=$(mktemp /etc/apt/sources.list.d/.lightbits-discovery-client.XXXXXX)
+            trap 'rm -f "$key_tmp" "$source_tmp"' EXIT
             curl -1sLf 'https://dl.lightbitslabs.com/public/discovery-client/gpg.014E5C7FAFD89AEE.key' \
-                | gpg --dearmor > /usr/share/keyrings/lightbits-discovery-client-archive-keyring.gpg
+                | gpg --dearmor > "$key_tmp"
             # Lightbits only publishes discovery-client's .deb under the "ubuntu" repo path
             # (confirmed live: the "debian" path exists but is an empty repo for every
             # codename). Proxmox is a Debian derivative, but the package itself is a generic
@@ -63,13 +73,17 @@ if ! command -v discovery-client &>/dev/null; then
             distro=ubuntu
             codename=jammy
             curl -1sLf "https://dl.lightbitslabs.com/public/discovery-client/config.deb.txt?distro=${distro}&codename=${codename}" \
-                > /etc/apt/sources.list.d/lightbits-discovery-client.list
+                > "$source_tmp"
+            chmod 0644 "$key_tmp" "$source_tmp"
+            mv "$key_tmp" /usr/share/keyrings/lightbits-discovery-client-archive-keyring.gpg
+            mv "$source_tmp" /etc/apt/sources.list.d/lightbits-discovery-client.list
+            trap - EXIT
             apt-get update -q
             apt-get install -y discovery-client
-        ) 2>/dev/null || echo "      WARNING: could not install discovery-client automatically — " \
-            "see https://github.com/LightBitsLabs/discovery-client for manual install steps."
+        ) >"$DSC_INSTALL_LOG" 2>&1 || echo "      WARNING: could not install discovery-client automatically - " \
+            "see $DSC_INSTALL_LOG for details, or https://github.com/LightBitsLabs/discovery-client for manual install steps."
     else
-        echo "      WARNING: no apt-get found — install discovery-client manually, see " \
+        echo "      WARNING: no apt-get found - install discovery-client manually, see " \
             "https://github.com/LightBitsLabs/discovery-client"
     fi
 else
@@ -77,7 +91,7 @@ else
 fi
 if command -v discovery-client &>/dev/null; then
     systemctl enable --now discovery-client 2>/dev/null || \
-        echo "      WARNING: discovery-client installed but could not be started — " \
+        echo "      WARNING: discovery-client installed but could not be started - " \
             "check 'systemctl status discovery-client'."
 fi
 
@@ -85,8 +99,31 @@ echo "[4/4] Restarting PVE services..."
 systemctl restart pvedaemon pvestatd
 echo "      -> Done."
 
+HEALTH_OK=1
 echo ""
-echo "Installation complete. The 'lightbits' storage type is now available."
+if command -v nvme &>/dev/null; then
+    echo "nvme-cli: OK (installed)"
+else
+    echo "nvme-cli: ACTION REQUIRED - not installed; volume activate/deactivate will fail."
+    HEALTH_OK=0
+fi
+if command -v discovery-client &>/dev/null && systemctl is-active --quiet discovery-client; then
+    echo "discovery-client: OK (installed and running)"
+else
+    echo "discovery-client: ACTION REQUIRED - not installed/running. Every volume"
+    echo "  activation depends on it; see $DSC_INSTALL_LOG (if present) or"
+    echo "  https://github.com/LightBitsLabs/discovery-client for manual install steps,"
+    echo "  then 'systemctl enable --now discovery-client'."
+    HEALTH_OK=0
+fi
+
+echo ""
+if [[ $HEALTH_OK -eq 1 ]]; then
+    echo "Installation complete. The 'lightbits' storage type is now available."
+else
+    echo "Plugin files installed, but resolve the ACTION REQUIRED item(s) above"
+    echo "before using this storage - volume activation will fail without them."
+fi
 echo ""
 echo "Add the storage with pvesm (replace values for your environment):"
 echo ""
