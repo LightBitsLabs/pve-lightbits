@@ -80,8 +80,13 @@ api() {   # api <METHOD> <path> [json-body] -> body on stdout; rc 0 on 2xx
     for h in ${API_HOSTS//,/ }; do
         out="$(curl "${args[@]}" -w $'\n%{http_code}' "https://$h$p" 2>/dev/null)" || continue
         code="${out##*$'\n'}"
-        printf '%s' "${out%$'\n'*}"
-        case "$code" in 2*) return 0 ;; *) return 1 ;; esac
+        # Same failover semantics as the plugin: a 4xx is a definitive answer
+        # (every endpoint fronts the same cluster state); a 5xx or a transport
+        # failure advances to the next endpoint.
+        case "$code" in
+            2*) printf '%s' "${out%$'\n'*}"; return 0 ;;
+            4*) printf '%s' "${out%$'\n'*}"; return 1 ;;
+        esac
     done
     return 1
 }
@@ -100,15 +105,28 @@ d = json.load(sys.stdin)
 vols = d.get("volumes") or (d if isinstance(d, list) else [])
 print("\n".join(sorted(v["UUID"] for v in vols)))'
 }
+list_uuids() {   # list_uuids <storage> -> sorted volume UUIDs from pvesm list
+    pvesm list "$1" | awk 'NR>1 {print $1}' \
+        | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+        | sort || true
+}
+subset_of() {   # subset_of <lines-a> <lines-b>: every line of a appears in b
+    [ -z "$(comm -23 <(sed '/^$/d' <<<"$1") <(sed '/^$/d' <<<"$2"))" ]
+}
+disjoint() {    # disjoint <lines-a> <lines-b>: no line appears in both
+    [ -z "$(comm -12 <(sed '/^$/d' <<<"$1") <(sed '/^$/d' <<<"$2"))" ]
+}
 
 is_our_vm() {
     local name
     name="$(qm config "$VMID" 2>/dev/null | awk -F': ' '/^name:/{print $2; exit}')" || return 1
     [ "$name" = "$TEST_VM_NAME" ]
 }
+ADDED_ISO_STORAGE=""   # set only after THIS run's pvesm add succeeds
 cleanup() {
     if is_our_vm; then qm destroy "$VMID" --purge 1 >/dev/null 2>&1 || true; fi
-    pvesm remove "$ISO_STORAGE" >/dev/null 2>&1 || true
+    # never remove a storage this run did not create
+    [ -n "$ADDED_ISO_STORAGE" ] && { pvesm remove "$ISO_STORAGE" >/dev/null 2>&1 || true; }
     if [ -n "${BY_UUID:-}" ]; then
         api DELETE "/api/v2/volumes/$BY_UUID?projectName=$ISO_PROJECT" >/dev/null 2>&1 || true
     fi
@@ -138,6 +156,12 @@ trap cleanup EXIT
 
 # --- setup: scratch project + bystander volume --------------------------------
 echo "== setup: project '$ISO_PROJECT' + bystander volume (base project: '$BASE_PROJECT') =="
+# Refuse to run if the temporary storage id is taken — cleanup removes it.
+if awk -v s="$ISO_STORAGE" '$1 ~ /:$/ && $2 == s {found=1} END {exit !found}' /etc/pve/storage.cfg 2>/dev/null; then
+    echo "ABORT: storage '$ISO_STORAGE' already exists; refusing to reuse (it is removed on cleanup). Set ISO_STORAGE to an unused id." >&2
+    trap - EXIT
+    exit 1
+fi
 # Refuse to run against a project that already exists — we delete it at the end.
 if api GET "/api/v2/projects/$ISO_PROJECT" >/dev/null 2>&1; then
     echo "ABORT: project '$ISO_PROJECT' already exists; refusing to reuse (it is deleted on cleanup). Set ISO_PROJECT to an unused name." >&2
@@ -182,6 +206,7 @@ echo "== lifecycle on '$ISO_STORAGE' ($ISO_PROJECT) =="
 pvesm add lightbits "$ISO_STORAGE" \
     --lb_api_host "$API_HOSTS" --lb_jwt "$JWT" --lb_nvme_host "$NVME_HOSTS" \
     --lb_project "$ISO_PROJECT" --lb_replica_count "$REPLICAS" --content images >/dev/null
+ADDED_ISO_STORAGE=1
 BASE_BEFORE="$(proj_vol_uuids "$BASE_PROJECT")"
 qm create "$VMID" --memory 512 --scsihw virtio-scsi-single --name "$TEST_VM_NAME" >/dev/null
 qm set "$VMID" --scsi0 "${ISO_STORAGE}:${DISK_GB}" >/dev/null
@@ -189,14 +214,23 @@ qm snapshot "$VMID" s1 >/dev/null
 qm resize "$VMID" scsi0 +1G >/dev/null
 qm delsnapshot "$VMID" s1 >/dev/null
 
-# listing isolation, while the scratch volume exists: each storage sees only
-# its own project
-pvesm list "$ISO_STORAGE" | grep -q "vm-${VMID}-" \
-    && ok "'$ISO_STORAGE' lists its own volume" \
-    || bad "'$ISO_STORAGE' does not list its own volume"
-pvesm list "$STORAGE" | grep -q "$BY_UUID\|vm-${VMID}-" \
-    && bad "'$STORAGE' ($BASE_PROJECT) lists volumes of '$ISO_PROJECT'" \
-    || ok "'$STORAGE' never lists '$ISO_PROJECT' volumes"
+# listing isolation, while the scratch volume exists: each storage's complete
+# listing must contain only volumes of its own project (exclusivity, not just
+# presence of the expected entry)
+ISO_SET="$(proj_vol_uuids "$ISO_PROJECT")"
+BASE_SET="$(proj_vol_uuids "$BASE_PROJECT")"
+ISO_LISTED="$(list_uuids "$ISO_STORAGE")"
+BASE_LISTED="$(list_uuids "$STORAGE")"
+if [ -n "$ISO_LISTED" ] && subset_of "$ISO_LISTED" "$ISO_SET" && disjoint "$ISO_LISTED" "$BASE_SET"; then
+    ok "'$ISO_STORAGE' lists only '$ISO_PROJECT' volumes (incl. its own test volume)"
+else
+    bad "'$ISO_STORAGE' listing is not scoped to '$ISO_PROJECT' (listed: $(tr '\n' ' ' <<<"$ISO_LISTED"))"
+fi
+if subset_of "$BASE_LISTED" "$BASE_SET" && disjoint "$BASE_LISTED" "$ISO_SET"; then
+    ok "'$STORAGE' lists only '$BASE_PROJECT' volumes"
+else
+    bad "'$STORAGE' listing is not scoped to '$BASE_PROJECT' (listed: $(tr '\n' ' ' <<<"$BASE_LISTED"))"
+fi
 
 qm destroy "$VMID" --purge 1 >/dev/null
 BASE_AFTER="$(proj_vol_uuids "$BASE_PROJECT")"
