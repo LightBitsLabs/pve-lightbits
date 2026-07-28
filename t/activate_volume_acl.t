@@ -11,6 +11,14 @@ use warnings;
 use Test::More;
 use FindBin;
 
+# The sleep override must be installed BEFORE the module is compiled: code
+# already compiled against the real sleep ignores a later override, so the
+# device-wait loop exercised below would otherwise sleep for real.
+BEGIN {
+    no warnings 'once';
+    *CORE::GLOBAL::sleep = sub { 1 };
+}
+
 use lib "$FindBin::RealBin/stubs";
 require "$FindBin::RealBin/../LightbitsPlugin.pm";
 
@@ -85,11 +93,14 @@ my $uuid    = 'feedface-0000-4000-8000-000000000abc';
 
 # ── activate_volume calls it before waiting for the device ─────────────────────
 {
-    my @puts;
+    my (@puts, @events);
     no warnings 'redefine', 'once';
     local *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
         my (undef, $method, $path, $body) = @_;
-        push @puts, { method => $method, body => $body } if $method eq 'PUT';
+        if ($method eq 'PUT') {
+            push @puts,   { method => $method, body => $body };
+            push @events, 'acl-put';
+        }
         return { nsid => 5, acl => { values => ['nqn.other-host'] } } if $method eq 'GET';
         return {};
     };
@@ -98,8 +109,7 @@ my $uuid    = 'feedface-0000-4000-8000-000000000abc';
     local *PVE::Storage::Custom::LightbitsPlugin::_nvme_endpoints = sub { () };
     local *PVE::Storage::Custom::LightbitsPlugin::_connected_endpoints = sub { {} };
     local *PVE::Storage::Custom::LightbitsPlugin::_is_connected = sub { 0 };
-    local *PVE::Storage::Custom::LightbitsPlugin::_find_nvme_device = sub { undef };
-    local *CORE::GLOBAL::sleep = sub { };
+    local *PVE::Storage::Custom::LightbitsPlugin::_find_nvme_device = sub { push @events, 'device-probe'; undef };
     use warnings 'redefine', 'once';
 
     my $volname = 'vm-100-feedface-0000-4000-8000-000000000abc';
@@ -108,6 +118,10 @@ my $uuid    = 'feedface-0000-4000-8000-000000000abc';
     is( scalar(@puts), 1, 'activate_volume granted the ACL before giving up on the device wait' );
     is_deeply( $puts[0]{body}{acl}{values}, ['nqn.other-host', 'nqn.host.local'],
         'activate_volume\'s ACL grant is additive, matching _ensure_host_acl directly' );
+    ok( (grep { $_ eq 'device-probe' } @events) > 0,
+        'the device wait actually probed for the device' );
+    is( $events[0], 'acl-put',
+        'the ACL grant strictly precedes the first device probe (order recorded, not inferred)' );
 }
 
 done_testing();
