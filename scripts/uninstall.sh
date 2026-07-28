@@ -31,7 +31,8 @@ What it does:
      ($DSC_CONF_DIR/lightbits-*.conf), so
      discovery-client stops maintaining connections for them.
   2. Removes $PLUGIN_DST
-  3. Restarts pvedaemon and pvestatd.
+  3. Restarts pvedaemon and pvestatd, which have the plugin loaded in memory and
+     would otherwise keep serving the 'lightbits' storage type until restarted.
 
 What it deliberately leaves alone:
   - Volumes and snapshots on the Lightbits cluster. Nothing here touches your
