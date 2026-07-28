@@ -136,6 +136,36 @@ $delete_fails = 1;
 }
 $delete_fails = 0;
 
+# A polling GET that throws must also clean up. This is a separate exit path
+# from a bad state: a transport failure, every endpoint returning 5xx, or the
+# volume vanishing out of band all raise rather than reporting a state, and
+# letting that propagate would strand the volume just the same.
+{
+    my @deleted;
+    my $get_dies = 1;
+    no warnings 'redefine';
+    local *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
+        my (undef, $method, $path) = @_;
+        return { UUID => $UUID } if $method eq 'POST';
+        return { volumes => [] } if $method eq 'GET' && $path =~ /volumes\?/;
+        if ($method eq 'DELETE') { push @deleted, $path; return {} }
+        die "Lightbits API GET $path failed via 10.0.0.1:443: 503 Service Unavailable\n"
+            if $get_dies;
+        return { state => 'Available' };
+    };
+    use warnings 'redefine';
+
+    my $ok = eval { $class->alloc_image('lb-storage', $scfg, 100, 'raw', undef, 1048576); 1 };
+    ok( !$ok, 'alloc_image still raises when the status poll itself fails' );
+    like( $@, qr/503 Service Unavailable/,
+        'the underlying API error is re-raised unchanged, not summarised away' );
+    unlike( $@, qr/did not become Available/,
+        'a transport failure is not misreported as a convergence timeout' );
+    is( scalar(@deleted), 1, 'the volume is deleted even though polling never returned a state' );
+    like( $deleted[0], qr{^/api/v2/volumes/\Q$UUID\E\?projectName=default$},
+        'the cleanup targets the volume that was just created' );
+}
+
 # The happy path must not delete anything.
 $get_state = 'Available';
 {

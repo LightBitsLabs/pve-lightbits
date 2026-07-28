@@ -715,16 +715,26 @@ sub alloc_image {
     # failure (or if it never converges). Otherwise a Failed volume would be
     # returned as if it were created and the problem would only surface later —
     # cryptically — when activate_volume can't find its NSID.
+    # The polling itself is wrapped, because it can also throw — a transport
+    # failure, every endpoint returning 5xx, or the volume disappearing out of
+    # band. Letting that propagate straight out would skip the cleanup below and
+    # strand the volume just as surely as a Failed state does.
     my $state = '';
-    for my $attempt (1..30) {
-        my $v  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
-        $state = $v->{state} // '';
-        last if $state eq 'Available';
-        last if $state =~ /^(Failed|Deleting|Deleted)$/i;
-        sleep 1;
-    }
+    my $poll_err;
+    eval {
+        for my $attempt (1..30) {
+            my $v  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+            $state = $v->{state} // '';
+            last if $state eq 'Available';
+            last if $state =~ /^(Failed|Deleting|Deleted)$/i;
+            sleep 1;
+        }
+        1;
+    } or do {
+        $poll_err = $@ || "unknown error while waiting for volume $uuid\n";
+    };
 
-    if ($state ne 'Available') {
+    if (defined $poll_err || $state ne 'Available') {
         # The volume exists on the cluster but is unusable, and PVE only starts
         # tracking it once we return a volid — so dying here without cleaning up
         # strands it with nothing left to reap it. The orphan holds its name
@@ -732,6 +742,10 @@ sub alloc_image {
         # vmid and vmgenid collides on the same disk index) and, depending on how
         # it failed, its space.
         _discard_orphan_volume($scfg, $project, $uuid, $vol_name, $state);
+
+        # Re-raise the polling error unchanged: it names the actual transport or
+        # API failure, which is more use than any summary we could add.
+        die $poll_err if defined $poll_err;
 
         die "Lightbits volume $vol_name ($uuid) creation failed on the cluster "
             . "(state '$state')\n"
