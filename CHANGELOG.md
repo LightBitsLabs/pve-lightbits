@@ -10,8 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `alloc_image` now deletes a volume that was created on the cluster but never became usable, instead of leaving it stranded. Proxmox only starts tracking a volume once `alloc_image` returns a volid, so when the volume entered a terminal `Failed` state or never reached `Available`, the function raised an error and left an orphan behind that nothing would ever reap — holding its name (LightOS enforces per-project name uniqueness, so a retry for the same VM collided on the same disk index) and, depending on the failure, its space. Cleanup is best-effort: a cleanup that itself fails warns and names the volume for manual removal rather than masking the original creation error.
+
+## [0.9.2] - 2026-07-28 - Tech Preview
+
+Tech Preview release. Three reliability fixes for volumes shared between hosts or managed outside Proxmox, plus a live end-to-end regression suite covering each of them.
+
+### Fixed
+
+- `activate_volume` now grants the activating host's NQN on the volume's ACL, additively and idempotently. `alloc_image` only ACLs the creating host, so a volume activated on a *different* host — offline migration, HA failover, or `shared=1` multi-node access — never saw its namespace appear and activation timed out with no hint that the cause was ACL rather than connectivity. Existing ACL entries are preserved (concurrent hosts each keep access) and no API call is made when the host is already present (the common case). Validated live: a volume whose ACL was stripped to a foreign NQN activates correctly, with the ACL extended, not replaced.
 - A volume or snapshot deleted outside Proxmox is now reported as gone instead of being read as an empty resource. `_api` maps a 404 to an empty hash so idempotent deletes can treat "already gone" as success, but callers that read fields out of the result saw an empty hash as "present, just not converged yet". A volume deleted out of band mid-operation therefore made `alloc_image`, `volume_resize`, `volume_snapshot`, and `volume_snapshot_rollback` poll out their full 30-60 iteration timeout and then blame a cluster convergence problem; `volume_rollback_is_possible` compared two zero sizes and allowed a rollback that could not work; and `volume_size_info` reported the disk as 0 bytes. These paths now fail immediately with an error naming the missing resource. The idempotent delete paths (`free_image`, `_delete_snapshot`) are unchanged.
 - `activate_volume` now re-validates an existing `/dev/lightbits/<storeid>/<uuid>` symlink against the volume's subsystem NQN and NSID instead of trusting any block device found at that path. NVMe controller numbering is not stable across a disconnect/reconnect or path flap, so a symlink left by an earlier activation could dangle — making every later activation fail with `Cannot create symlink ...: File exists` until it was removed by hand — or, worse, resolve to a namespace that now belongs to a different volume, in which case activation reported success and handed QEMU the wrong disk. A symlink that no longer matches is replaced.
+
+### Added
+
+- Live end-to-end regression suites under `t/e2e/`, run against a real Proxmox node with a configured Lightbits storage: `project_isolation.sh` (operations in one LightOS project can never touch volumes in another, in either direction), `stale_symlink.sh` (dangling and wrong-volume symlinks are repaired on activation, validated against `/sys` nsid and subsystem NQN), and `vanished_resource.sh` (out-of-band deletions fail accurately and immediately where read, while the idempotent delete paths keep treating "already gone" as success). All validated on a 3-node LightOS 3.20.1 cluster alongside the existing `snapshots.sh`.
 
 ## [0.9.1] - 2026-07-26 - Tech Preview
 
