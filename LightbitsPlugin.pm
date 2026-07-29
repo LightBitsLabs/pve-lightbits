@@ -67,7 +67,15 @@ sub _api {
         }
 
         my $res = $ua->request($req);
-        return {} if $res->code == 404;
+        # A 404 is reported as an empty result so the idempotent paths can treat
+        # "already gone" as success (free_image deleting a volume that is no
+        # longer there, _delete_snapshot re-checking after a racing delete).
+        # Callers that go on to read fields out of the result need to tell an
+        # absent resource apart from an empty one and ask for undef instead;
+        # see _get_existing.
+        if ($res->code == 404) {
+            return $opts{missing_is_undef} ? undef : {};
+        }
         if ($res->is_success) {
             return {} if !$res->content || $res->content eq '{}';
             return decode_json($res->content);
@@ -80,6 +88,24 @@ sub _api {
             && ($res->code >= 500 || ($res->header('Client-Warning') // '') eq 'Internal response');
     }
     die join('', @errors);
+}
+
+# GET a resource that the caller is about to read fields out of, failing
+# immediately if the cluster says it is gone.
+#
+# _api maps a 404 to an empty hash, which is right for the idempotent delete
+# paths but wrong here: an empty hash has no `state` and no `size`, so a
+# resource deleted out of band reads as "present, just not converged yet". The
+# polling loops would spin out their full 30-60 iteration timeout before failing
+# with a misleading "did not become Available" message that sends the operator
+# looking for a cluster convergence problem, and volume_rollback_is_possible
+# would compare two zero sizes and green-light a rollback that cannot work.
+sub _get_existing {
+    my ($scfg, $path, $what, %opts) = @_;
+    my $data = _api($scfg, 'GET', $path, undef, %opts, missing_is_undef => 1);
+    die "$what no longer exists on the Lightbits cluster (deleted outside Proxmox?)\n"
+        unless defined $data;
+    return $data;
 }
 
 sub _project    { return $_[0]->{lb_project} // 'default'; }
@@ -224,6 +250,27 @@ our $DEV_DIR   = '/dev';
 sub _dev_path { return "$DEV_DIR/$_[0]"; }
 sub _is_block { return -b $_[0]; }
 
+# Subsystem NQN of a /sys/block namespace entry, or undef. The head's "device"
+# link points at the NVMe subsystem; fall back to the namespace dir itself for
+# older kernels that expose subsysnqn there.
+sub _ns_subsysnqn {
+    my ($ns) = @_;
+    my $f = "$SYS_BLOCK/$ns/device/subsysnqn";
+    $f = "$SYS_BLOCK/$ns/subsysnqn" unless -f $f;
+    return _read_sysfs($f);
+}
+
+# True if the /sys/block namespace entry $ns is exactly the (subsystem NQN,
+# nsid) namespace we are looking for.
+sub _ns_matches {
+    my ($ns, $subsys_nqn, $nsid) = @_;
+    my $nqn = _ns_subsysnqn($ns);
+    return 0 unless defined $nqn && $nqn eq $subsys_nqn;
+    my $found = _read_sysfs("$SYS_BLOCK/$ns/nsid");
+    return 0 unless defined $found && $found =~ /^(\d+)$/;
+    return $1 == $nsid ? 1 : 0;
+}
+
 # Resolve the namespace HEAD block device for a (subsystem NQN, nsid) pair.
 #
 # Under native NVMe multipath (CONFIG_NVME_MULTIPATH=Y, the default), each
@@ -246,29 +293,44 @@ sub _find_nvme_device {
         # form is skipped. Capture to untaint (the CI runs perl -T).
         next unless $entry =~ /^(nvme\d+n\d+)$/;
         my $ns = $1;
-
-        # The namespace's subsystem NQN. The head's "device" link points at the
-        # NVMe subsystem; fall back to the namespace dir for older kernels.
-        my $nqn_f = "$SYS_BLOCK/$ns/device/subsysnqn";
-        $nqn_f = "$SYS_BLOCK/$ns/subsysnqn" unless -f $nqn_f;
-        next unless -f $nqn_f;
-        open(my $fh, '<', $nqn_f) or next;
-        chomp(my $nqn = <$fh>);
-        close($fh);
-        next unless $nqn eq $subsys_nqn;
-
-        my $nsid_f = "$SYS_BLOCK/$ns/nsid";
-        next unless -f $nsid_f;
-        open(my $nfh, '<', $nsid_f) or next;
-        chomp(my $found_nsid = <$nfh>);
-        close($nfh);
-        next unless $found_nsid == $nsid;
+        next unless _ns_matches($ns, $subsys_nqn, $nsid);
 
         my $dev = _dev_path($ns);
         return $dev if _is_block($dev);
     }
     closedir($dh);
     return undef;
+}
+
+# The "nvme<C>n<N>" namespace a volume symlink resolves to, or undef when the
+# link is absent or points somewhere unrecognised. The capture untaints the
+# value read back from the filesystem.
+sub _symlink_ns {
+    my ($link) = @_;
+    return undef unless -l $link;
+    my $dev = readlink($link) or return undef;
+    return $1 if $dev =~ m{/(nvme\d+n\d+)$};
+    return undef;
+}
+
+# True when $link still resolves to the head block device of exactly this
+# (subsystem NQN, nsid) namespace.
+#
+# NVMe controller numbering is NOT stable across a disconnect/reconnect or a
+# path flap: the device this volume occupied can come back as a different
+# nvme<C>n<N>, and the old name can be reused by an entirely different
+# namespace. A symlink left behind by an earlier activation is therefore only
+# trustworthy once re-validated — otherwise a dangling link makes the symlink()
+# below fail with EEXIST (activation stays broken until someone unlinks it by
+# hand), and a link that now resolves to another volume's device would be
+# reported as success and hand QEMU the wrong disk. Two sysfs reads, no API call.
+sub _symlink_is_current {
+    my ($link, $subsys_nqn, $nsid) = @_;
+    # _is_block (not a bare -b) so tests can drive this with a fake /dev; both
+    # follow the symlink, so this is the same check in production.
+    return 0 unless _is_block($link);
+    my $ns = _symlink_ns($link) or return 0;
+    return _ns_matches($ns, $subsys_nqn, $nsid);
 }
 
 sub _symlink_path {
@@ -689,13 +751,30 @@ sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
     my $project = _project($scfg);
     my $uuid    = _vol_uuid($volname);
-    my $vol     = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project", undef, timeout => $timeout // 15);
+    # Strict: a vanished volume must not be reported as a 0-byte disk, which
+    # would propagate a bogus size into the guest config.
+    my $vol     = _get_existing($scfg, "/api/v2/volumes/$uuid?projectName=$project",
+        "Volume $uuid", timeout => $timeout // 15);
     my $size    = int($vol->{size} // 0);
     my $used    = int(($vol->{statistics} // {})->{logicalUsedStorage} // 0);
     return wantarray ? ($size, 'raw', $used, undef) : $size;
 }
 
 # ── Volume lifecycle ──────────────────────────────────────────────────────────
+
+# Best-effort removal of a volume that was created but never became usable.
+#
+# Deliberately non-fatal: the creation failure is what the operator needs to
+# see, so a cleanup problem is warned about rather than allowed to replace it
+# (dying here would swap a precise "volume entered state Failed" for a vague
+# delete error). A volume the cluster is already removing needs no DELETE.
+sub _discard_orphan_volume {
+    my ($scfg, $project, $uuid, $vol_name, $state) = @_;
+    return if defined $state && $state =~ /^(Deleting|Deleted)$/i;
+    eval { _api($scfg, 'DELETE', "/api/v2/volumes/$uuid?projectName=$project"); 1 }
+        or warn "Lightbits: could not remove unusable volume $vol_name ($uuid) after a "
+            . "failed creation; it may need to be deleted manually: $@";
+}
 
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
@@ -739,19 +818,49 @@ sub alloc_image {
     # failure (or if it never converges). Otherwise a Failed volume would be
     # returned as if it were created and the problem would only surface later —
     # cryptically — when activate_volume can't find its NSID.
+    # The polling itself is wrapped, because it can also throw — a transport
+    # failure, every endpoint returning 5xx, or the volume disappearing out of
+    # band. Letting that propagate straight out would skip the cleanup below and
+    # strand the volume just as surely as a Failed state does.
     my $state = '';
-    for my $attempt (1..30) {
-        my $v  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
-        $state = $v->{state} // '';
-        last if $state eq 'Available';
+    my $poll_err;
+    eval {
+        for my $attempt (1..30) {
+            # _get_existing (not plain _api): a volume vanishing out of band
+            # mid-poll dies here with an error naming it — caught by this eval,
+            # so the cleanup below still runs (a 404-tolerated no-op for a
+            # vanished volume) and the accurate error is re-raised.
+            my $v  = _get_existing($scfg, "/api/v2/volumes/$uuid?projectName=$project",
+                "Volume $vol_name ($uuid)");
+            $state = $v->{state} // '';
+            last if $state eq 'Available';
+            last if $state =~ /^(Failed|Deleting|Deleted)$/i;
+            sleep 1;
+        }
+        1;
+    } or do {
+        $poll_err = $@ || "unknown error while waiting for volume $uuid\n";
+    };
+
+    if (defined $poll_err || $state ne 'Available') {
+        # The volume exists on the cluster but is unusable, and PVE only starts
+        # tracking it once we return a volid — so dying here without cleaning up
+        # strands it with nothing left to reap it. The orphan holds its name
+        # (LightOS enforces per-project name uniqueness, so a retry with the same
+        # vmid and vmgenid collides on the same disk index) and, depending on how
+        # it failed, its space.
+        _discard_orphan_volume($scfg, $project, $uuid, $vol_name, $state);
+
+        # Re-raise the polling error unchanged: it names the actual transport or
+        # API failure, which is more use than any summary we could add.
+        die $poll_err if defined $poll_err;
+
         die "Lightbits volume $vol_name ($uuid) creation failed on the cluster "
             . "(state '$state')\n"
             if $state =~ /^(Failed|Deleting|Deleted)$/i;
-        sleep 1;
+        die "Lightbits volume $vol_name ($uuid) did not become Available within timeout "
+            . "(last state '$state')\n";
     }
-    die "Lightbits volume $vol_name ($uuid) did not become Available within timeout "
-        . "(last state '$state')\n"
-        if $state ne 'Available';
 
     # The volid embeds the vmid so PVE can identify the owning guest (the UUID
     # remains the Lightbits volume's real identity, recovered via _vol_uuid).
@@ -805,6 +914,23 @@ sub path {
 
 # ── Activate / deactivate ─────────────────────────────────────────────────────
 
+# Idempotently, additively grant this host's NQN access to a volume. $vol is
+# the already-fetched GET response, so this costs no extra API call in the
+# common case (host already ACL'd). Additive — never removes an existing
+# entry — so a volume with several hosts activated concurrently (shared=1,
+# or a migration mid-flight) keeps every host's access; pruning stale entries
+# is a separate, not-yet-implemented concern.
+sub _ensure_host_acl {
+    my ($scfg, $project, $uuid, $vol) = @_;
+    my $host_nqn = _host_nqn();
+    my @values   = @{ $vol->{acl}{values} // [] };
+    return if grep { $_ eq $host_nqn } @values;
+
+    push @values, $host_nqn;
+    _api($scfg, 'PUT', "/api/v2/volumes/$uuid?projectName=$project",
+        { projectName => $project, acl => { values => \@values } });
+}
+
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
     make_path("$SYMLINK_DIR/$storeid");
@@ -825,11 +951,28 @@ sub activate_volume {
     my $subsys_nqn = _subsys_nqn($scfg);
     my $link       = _symlink_path($storeid, $uuid);
 
-    return 1 if -b $link;
-
-    # Fetch volume metadata
+    # Fetch volume metadata. This runs before the "already active" check below
+    # because that check needs the nsid to tell a still-valid symlink from one
+    # left over from a previous activation (see _symlink_is_current).
     my $vol  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
     my $nsid = $vol->{nsid} or die "Cannot determine NSID for volume $uuid\n";
+
+    # Grant this host access before waiting for its device: alloc_image only
+    # ACLs the creating host, so a volume activated on a different host
+    # (offline migration, HA failover, or shared=1 multi-node access) would
+    # otherwise never see its namespace and the wait below would time out.
+    # Runs before the mapped-already early return on purpose: the grant is a
+    # no-op API-wise when the host is already in the ACL, and it must not be
+    # skippable by a symlink that merely looks current.
+    _ensure_host_acl($scfg, $project, $uuid, $vol);
+
+    # Already mapped on this node, and the link still points at this volume's
+    # namespace: nothing to do.
+    return 1 if _symlink_is_current($link, $subsys_nqn, $nsid);
+
+    # Otherwise any link present is stale (dangling, or now resolving to some
+    # other namespace). Drop it so the symlink() below can recreate it.
+    unlink $link if -l $link;
 
     # Seed discovery-client with this cluster's discovery endpoints instead of
     # driving `nvme connect` ourselves (see the "discovery-client integration"
@@ -871,13 +1014,8 @@ sub activate_volume {
 sub _nqn_still_in_use {
     my ($subsys_nqn) = @_;
     for my $l (glob("$SYMLINK_DIR/*/*")) {
-        next unless -l $l;
-        my $dev = readlink($l) or next;
-        next unless $dev =~ m{/(nvme\d+n\d+)$};
-        my $ns = $1;
-        my $f = "$SYS_BLOCK/$ns/device/subsysnqn";
-        $f = "$SYS_BLOCK/$ns/subsysnqn" unless -f $f;
-        my $nqn = _read_sysfs($f);
+        my $ns = _symlink_ns($l) or next;
+        my $nqn = _ns_subsysnqn($ns);
         return 1 if defined $nqn && $nqn eq $subsys_nqn;
     }
     return 0;
@@ -985,7 +1123,8 @@ sub volume_resize {
     # assuming it on timeout.
     my ($cur, $state) = (0, '');
     for my $attempt (1..60) {
-        my $vol = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+        my $vol = _get_existing($scfg, "/api/v2/volumes/$uuid?projectName=$project",
+            "Volume $uuid");
         $cur    = int($vol->{size} // 0);
         $state  = $vol->{state} // '';
         last if $cur >= $bytes && $state eq 'Available';
@@ -1042,7 +1181,8 @@ sub volume_snapshot {
     # timeout so we never report a snapshot as taken when it never materialised.
     my $state = '';
     for my $attempt (1..30) {
-        my $s  = _api($scfg, 'GET', "/api/v2/projects/$project/snapshots/$snap_uuid");
+        my $s  = _get_existing($scfg, "/api/v2/projects/$project/snapshots/$snap_uuid",
+            "Snapshot $snap ($snap_uuid)");
         $state = $s->{state} // '';
         last if $state eq 'Available';
         die "Lightbits snapshot $snap ($snap_uuid) creation failed (state '$state')\n"
@@ -1110,8 +1250,10 @@ sub volume_rollback_is_possible {
     my $vol_uuid  = _vol_uuid($volname);
     my $snap_uuid = _snap_uuid($scfg, $project, $volname, $snap);
 
-    my $vol   = _api($scfg, 'GET', "/api/v2/volumes/$vol_uuid?projectName=$project");
-    my $sd    = _api($scfg, 'GET', "/api/v2/projects/$project/snapshots/$snap_uuid");
+    my $vol   = _get_existing($scfg, "/api/v2/volumes/$vol_uuid?projectName=$project",
+        "Volume $vol_uuid");
+    my $sd    = _get_existing($scfg, "/api/v2/projects/$project/snapshots/$snap_uuid",
+        "Snapshot '$snap' ($snap_uuid)");
     my $vsize = int($vol->{size} // 0);
     my $ssize = int($sd->{size}  // 0);
 
@@ -1146,7 +1288,8 @@ sub volume_snapshot_rollback {
     # timeout rather than assuming success.
     my $state = '';
     for my $attempt (1..60) {
-        my $v  = _api($scfg, 'GET', "/api/v2/volumes/$vol_uuid?projectName=$project");
+        my $v  = _get_existing($scfg, "/api/v2/volumes/$vol_uuid?projectName=$project",
+            "Volume $vol_uuid");
         $state = $v->{state} // '';
         last if $state eq 'Available';
         die "Lightbits volume $vol_uuid rollback to '$snap' failed (state '$state')\n"
