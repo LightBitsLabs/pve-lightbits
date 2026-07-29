@@ -143,6 +143,8 @@ The installer:
 - Installs and starts `discovery-client` if not present (best-effort — if the repo setup fails, e.g. no internet access, it warns and continues; install it manually before use in that case)
 - Restarts `pvedaemon` and `pvestatd`
 
+Run `./scripts/install.sh --help` for the full description, requirements, and exit codes. Re-running the installer is safe and is how you upgrade to a newer plugin version.
+
 ### 3. Add the storage
 
 #### Via CLI (recommended for scripted/multi-node setups)
@@ -226,6 +228,10 @@ If any `lightbits` storage entries still exist in `/etc/pve/storage.cfg`, the
 script refuses to proceed and lists the `pvesm remove <storeid>` command for
 each one — remove them first (or pass `--force` to have the script do it for
 you) and re-run.
+
+Run `./scripts/uninstall.sh --help` for the full description, including what the
+uninstaller deliberately leaves in place (your Lightbits volumes and snapshots,
+the `nvme-cli`/`discovery-client` packages, and any live NVMe-oF connections).
 
 The uninstaller then removes, in order:
 - Every `discovery-client` config file this plugin wrote

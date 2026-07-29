@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/install.sh` and `scripts/uninstall.sh` accept `-h` / `--help` and print full usage: what the script does step by step, its options, requirements, exit codes, and — for the uninstaller — what it deliberately leaves in place (your Lightbits volumes and snapshots, the `nvme-cli`/`discovery-client` packages, and live NVMe-oF connections). Arguments are parsed before the root check, so `--help` works as an unprivileged user.
+- CI asserts that both scripts print usage for `-h`/`--help` and reject an unknown option with exit status 2 without writing to stdout.
+
+### Changed
+
+- Both scripts now reject unrecognised arguments with an error and exit status 2 instead of ignoring them. Previously `install.sh` ignored every argument, and `uninstall.sh` only looked for an exact `--force`, so a typo such as `--forse` was silently discarded and the script carried on in non-forcing mode while the operator believed otherwise.
+
 ### Fixed
 
 - `alloc_image` now deletes a volume that was created on the cluster but never became usable, instead of leaving it stranded. Proxmox only starts tracking a volume once `alloc_image` returns a volid, so when the volume entered a terminal `Failed` state or never reached `Available`, the function raised an error and left an orphan behind that nothing would ever reap — holding its name (LightOS enforces per-project name uniqueness, so a retry for the same VM collided on the same disk index) and, depending on the failure, its space. Cleanup is best-effort: a cleanup that itself fails warns and names the volume for manual removal rather than masking the original creation error.
