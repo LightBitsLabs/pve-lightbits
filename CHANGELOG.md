@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `alloc_image` now deletes a volume that was created on the cluster but never became usable, instead of leaving it stranded. Proxmox only starts tracking a volume once `alloc_image` returns a volid, so when the volume entered a terminal `Failed` state or never reached `Available`, the function raised an error and left an orphan behind that nothing would ever reap — holding its name (LightOS enforces per-project name uniqueness, so a retry for the same VM collided on the same disk index) and, depending on the failure, its space. Cleanup is best-effort: a cleanup that itself fails warns and names the volume for manual removal rather than masking the original creation error.
+
 ## [0.9.2] - 2026-07-28 - Tech Preview
 
 Tech Preview release. Three reliability fixes for volumes shared between hosts or managed outside Proxmox, plus a live end-to-end regression suite covering each of them.
