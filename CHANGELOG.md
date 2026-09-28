@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `LICENSE` is now the verbatim Apache License 2.0 text from apache.org. The previous file was headed "Apache License, Version 2.0" but its wording had drifted from the official text in a number of clauses (among them the definitions of "Contribution" and "Contributor", the redistribution terms in section 4, and sections 8 and 9), and it carried a copyright line above the license body. The official text has no per-project edits, so GitHub could not identify the license and showed it as "Other". The copyright notice stays in `NOTICE` and in the `SPDX-License-Identifier: Apache-2.0` header of every source file; the license terms of the project are unchanged.
 - `alloc_image` now deletes a volume that was created on the cluster but never became usable, instead of leaving it stranded. Proxmox only starts tracking a volume once `alloc_image` returns a volid, so when the volume entered a terminal `Failed` state or never reached `Available`, the function raised an error and left an orphan behind that nothing would ever reap — holding its name (LightOS enforces per-project name uniqueness, so a retry for the same VM collided on the same disk index) and, depending on the failure, its space. Cleanup is best-effort: a cleanup that itself fails warns and names the volume for manual removal rather than masking the original creation error.
 
 ## [0.9.2] - 2026-07-28 - Tech Preview
