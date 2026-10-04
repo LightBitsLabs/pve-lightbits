@@ -49,11 +49,11 @@ is( PVE::Storage::Custom::LightbitsPlugin::_vol_uuid($U),           $U, '_vol_uu
 {
     no warnings 'redefine';
     local *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
-        return { size => '2147483648', statistics => { logicalUsedStorage => '1048576' } };
+        return { size => '2147483648', statistics => { logicalUsedStorage => '1048576' }, labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'node-a' } ] };
     };
-    my $size = $class->volume_size_info({ lb_project => 'default' }, 'lb-storage', "vm-100-$U");
+    my $size = $class->volume_size_info({ lb_project => 'default', lb_owner_id => 'node-a' }, 'lb-storage', "vm-100-$U");
     is( $size, 2147483648, 'volume_size_info (scalar) returns the size' );
-    my @info = $class->volume_size_info({ lb_project => 'default' }, 'lb-storage', "vm-100-$U");
+    my @info = $class->volume_size_info({ lb_project => 'default', lb_owner_id => 'node-a' }, 'lb-storage', "vm-100-$U");
     is( $info[0], 2147483648, 'volume_size_info (list): size' );
     is( $info[1], 'raw',       'volume_size_info (list): format is raw' );
 }

@@ -642,6 +642,9 @@ sub _is_owned_volume {
 }
 
 # Fetch a volume and refuse to proceed unless it is ours (see _is_owned_volume).
+# Every path that mutates or hands out a volume by volid goes through here:
+# volume_size_info, activate_volume, free_image, volume_resize, volume_snapshot,
+# volume_snapshot_delete and volume_snapshot_rollback.
 # Returns the volume record; dies naming the volume and the storage's owner id.
 # A volume that no longer exists comes back as an empty hash (_api maps 404 to
 # {}), which is returned as-is so idempotent callers can treat it as "gone".
@@ -655,6 +658,16 @@ sub _owned_volume_or_die {
     die "refusing to $what Lightbits volume $uuid ('$name', project '$project'): "
       . "it was not created by this Proxmox storage (owner id '$owner_id') "
       . "- missing or foreign ownership labels. Manage it with lbcli instead.\n";
+}
+
+# Same, for callers that also need the volume to exist: a vanished volume is
+# reported with the same wording as _get_existing.
+sub _owned_existing_volume {
+    my ($scfg, $project, $uuid, $what) = @_;
+    my $vol = _owned_volume_or_die($scfg, $project, $uuid, $what);
+    die "Volume $uuid no longer exists on the Lightbits cluster (deleted outside Proxmox?)\n"
+        unless %$vol;
+    return $vol;
 }
 
 # Generate a random v4-ish UUID, used as a fallback per-VM identity.
@@ -759,10 +772,12 @@ sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
     my $project = _project($scfg);
     my $uuid    = _vol_uuid($volname);
+    # Ownership guard: this is what `qm set --scsiN <volid>` consults for a
+    # stopped VM (no activation happens), so refusing here keeps a foreign volid
+    # out of VM configs altogether instead of failing later on resize/snapshot.
     # Strict: a vanished volume must not be reported as a 0-byte disk, which
     # would propagate a bogus size into the guest config.
-    my $vol     = _get_existing($scfg, "/api/v2/volumes/$uuid?projectName=$project",
-        "Volume $uuid", timeout => $timeout // 15);
+    my $vol     = _owned_existing_volume($scfg, $project, $uuid, 'use');
     my $size    = int($vol->{size} // 0);
     my $used    = int(($vol->{statistics} // {})->{logicalUsedStorage} // 0);
     return wantarray ? ($size, 'raw', $used, undef) : $size;
@@ -976,8 +991,7 @@ sub activate_volume {
     # left over from a previous activation (see _symlink_is_current).
     # Ownership guard first: activating a volume rewrites its ACL (below), so
     # a foreign volume named by volid must be refused before anything is sent.
-    my $vol = _owned_volume_or_die($scfg, $project, $uuid, 'activate');
-    die "Lightbits volume $uuid not found in project '$project'\n" unless %$vol;
+    my $vol = _owned_existing_volume($scfg, $project, $uuid, 'activate');
     my $nsid = $vol->{nsid} or die "Cannot determine NSID for volume $uuid\n";
 
     # Grant this host access before waiting for its device: alloc_image only
@@ -1132,6 +1146,10 @@ sub volume_resize {
     my $project = _project($scfg);
     my $uuid    = _vol_uuid($volname);
 
+    # Ownership guard before the PUT (a VM config may still reference a foreign
+    # volid from before the guard existed).
+    _owned_existing_volume($scfg, $project, $uuid, 'resize');
+
     # 4 KiB-align (Lightbits requires it), matching alloc_image.
     my $bytes = int(($size + 4095) / 4096) * 4096;
 
@@ -1192,6 +1210,9 @@ sub volume_snapshot {
     die "invalid snapshot name '$snap'\n"
         unless $snap =~ /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
+    # Ownership guard: never snapshot a volume this storage did not create.
+    _owned_existing_volume($scfg, $project, $vol_uuid, 'snapshot');
+
     my $body = {
         name             => _lb_snap_name($vol_uuid, $snap),
         sourceVolumeUUID => $vol_uuid,
@@ -1243,6 +1264,10 @@ sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snap, $running) = @_;
 
     my $project = _project($scfg);
+
+    # Ownership guard: a foreign volume's snapshots are not ours to delete. A
+    # volume that is already gone falls through to the idempotent path below.
+    _owned_volume_or_die($scfg, $project, _vol_uuid($volname), 'delete a snapshot of');
 
     # Idempotent on an already-removed snapshot: _snap_uuid dies with "not found"
     # when the snapshot is gone from the listing, which we treat as success (PVE
@@ -1302,6 +1327,10 @@ sub volume_snapshot_rollback {
 
     my $project   = _project($scfg);
     my $vol_uuid  = _vol_uuid($volname);
+
+    # Ownership guard before the rollback PUT.
+    _owned_existing_volume($scfg, $project, $vol_uuid, 'roll back');
+
     my $snap_uuid = _snap_uuid($scfg, $project, $volname, $snap);
 
     _api($scfg, 'PUT', "/api/v2/projects/$project/volumes/$vol_uuid/rollback",

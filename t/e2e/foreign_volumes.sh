@@ -80,17 +80,19 @@ print(json.dumps({k: v.get(k) for k in ("name","UUID","size","replicaCount","acl
 }
 wait_available() { for _ in $(seq 1 60); do [ "$(api GET "/api/v2/volumes/$1?projectName=$PROJECT" | jget 'd.get("state")')" = Available ] && return 0; sleep 1; done; return 1; }
 
-is_our_vm() { [ "$(qm config "$VMID" 2>/dev/null | awk -F': ' '/^name:/{print $2; exit}')" = "$TEST_VM_NAME" ]; }
+# Only a VM created by THIS invocation is ever destroyed: the flag is set right
+# after our own `qm create`, and any pre-existing VMID (whatever its name) aborts.
+VM_CREATED=""
 FOREIGN_UUID=""; DECOY_UUID=""
 cleanup() {
-    if is_our_vm; then qm destroy "$VMID" --purge 1 >/dev/null 2>&1 || true; fi
+    if [ -n "$VM_CREATED" ]; then qm destroy "$VMID" --purge 1 >/dev/null 2>&1 || true; fi
     for u in "$FOREIGN_UUID" "$DECOY_UUID"; do
         [ -n "$u" ] && api DELETE "/api/v2/volumes/$u?projectName=$PROJECT" >/dev/null 2>&1 || true
     done
 }
 trap cleanup EXIT
-if qm config "$VMID" >/dev/null 2>&1 && ! is_our_vm; then
-    echo "ABORT: VMID $VMID exists and is not ours; pick another VMID." >&2; exit 1
+if qm config "$VMID" >/dev/null 2>&1; then
+    echo "ABORT: VMID $VMID already exists; pick an unused VMID." >&2; exit 1
 fi
 
 REPLICAS="$(scfg_val "$STORAGE" lb_replica_count)"; REPLICAS="${REPLICAS:-1}"
@@ -118,7 +120,7 @@ for pair in "$FOREIGN_UUID foreign" "$DECOY_UUID decoy"; do set -- $pair
 done
 
 # 3. attach by volid refused, ACL untouched
-qm create "$VMID" --name "$TEST_VM_NAME" --memory 256 --cores 1 --scsihw virtio-scsi-pci >/dev/null
+qm create "$VMID" --name "$TEST_VM_NAME" --memory 256 --cores 1 --scsihw virtio-scsi-pci >/dev/null && VM_CREATED=1
 if out="$(qm set "$VMID" --scsi1 "$STORAGE:vm-0-$FOREIGN_UUID" 2>&1)"; then bad "attaching the foreign volume by volid succeeded: $out"
 else grep -q "refusing to activate" <<<"$out" && ok "attaching the foreign volume by volid is refused with the ownership error" || bad "attach failed for another reason: $out"; fi
 [ "$(vol_fp "$FOREIGN_UUID")" = "$FP_FOREIGN" ] && ok "foreign volume (incl. ACL) is byte-identical after the attach attempt" || bad "foreign volume changed: $(vol_fp "$FOREIGN_UUID")"
@@ -129,7 +131,7 @@ qm config "$VMID" | grep -q '^scsi1:' && bad "foreign volid ended up in the VM c
 if qm set "$VMID" --scsi0 "$STORAGE:1" >/dev/null 2>&1; then ok "plugin-created volume allocates on the same storage"
     OWN_VOLID="$(qm config "$VMID" | awk -F'[ ,]' '/^scsi0:/{print $2}')"
     grep -q "$OWN_VOLID" <<<"$(pvesm list "$STORAGE" | awk 'NR>1 {print $1}')" && ok "  ...and is listed" || bad "  ...but is not listed"
-    qm destroy "$VMID" --purge 1 >/dev/null 2>&1 && ok "  ...and is freed by qm destroy --purge" || bad "  ...qm destroy --purge failed"
+    qm destroy "$VMID" --purge 1 >/dev/null 2>&1 && { VM_CREATED=""; ok "  ...and is freed by qm destroy --purge"; } || bad "  ...qm destroy --purge failed"
     grep -q "$OWN_VOLID" <<<"$(pvesm list "$STORAGE" | awk 'NR>1 {print $1}')" && bad "  own volume still listed after purge" || ok "  own volume gone after purge"
 else bad "could not allocate a plugin volume on $STORAGE"; fi
 

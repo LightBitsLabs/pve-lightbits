@@ -135,7 +135,38 @@ for my $k (qw(foreign decoy other_pve allowany legacy)) {
 
     @calls = (); local $gone->{ $U{ours} } = 1;
     eval { $class->activate_volume('lb-storage', $scfg, "vm-100-$U{ours}", undef, {}) };
-    like( $@, qr/not found in project/, 'activate_volume of a vanished volume fails immediately, naming it' );
+    like( $@, qr/no longer exists/, 'activate_volume of a vanished volume fails immediately, naming it' );
+}
+
+# ── resize / snapshot / rollback / size lookup: same guard, before any PUT/POST ─
+{
+    my %cases = (
+        'volume_size_info'         => sub { $class->volume_size_info($scfg, 'lb-storage', $_[0]) },
+        'volume_resize'            => sub { $class->volume_resize($scfg, 'lb-storage', $_[0], 2 * 1024**3, 0) },
+        'volume_snapshot'          => sub { $class->volume_snapshot($scfg, 'lb-storage', $_[0], 'snap1') },
+        'volume_snapshot_delete'   => sub { $class->volume_snapshot_delete($scfg, 'lb-storage', $_[0], 'snap1', 0) },
+        'volume_snapshot_rollback' => sub { $class->volume_snapshot_rollback($scfg, 'lb-storage', $_[0], 'snap1') },
+    );
+    for my $op (sort keys %cases) {
+        for my $k (qw(foreign decoy other_pve)) {
+            @calls = ();
+            eval { $cases{$op}->("vm-0-$U{$k}") };
+            like( $@, qr/refusing to .*Lightbits volume $U{$k}/, "$op refuses the $k volume" );
+            is( scalar(@calls), 0, "  ...without issuing any mutating API call" );
+        }
+    }
+    # our own volume passes the guard (and reaches the normal code path)
+    @calls = ();
+    my ($size) = eval { $class->volume_size_info($scfg, 'lb-storage', "vm-100-$U{ours}") };
+    is( $@, '', 'volume_size_info of our own volume passes the guard' );
+    is( $size, 1, '  ...and reports its size' );
+    @calls = ();
+    eval { $class->volume_resize($scfg, 'lb-storage', "vm-100-$U{ours}", 2 * 1024**3, 0) };
+    ok( (grep { $_->[0] eq 'PUT' && $_->[1] =~ /$U{ours}/ } @calls), 'volume_resize of our own volume issues its PUT' );
+    # a vanished volume is reported as gone, with the usual wording
+    local $gone->{ $U{ours} } = 1;
+    eval { $class->volume_size_info($scfg, 'lb-storage', "vm-100-$U{ours}") };
+    like( $@, qr/no longer exists/, 'volume_size_info of a vanished volume dies with the "no longer exists" wording' );
 }
 
 done_testing();
