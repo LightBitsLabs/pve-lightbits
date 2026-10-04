@@ -75,14 +75,15 @@ my $api_calls = 0;
         # activation — otherwise the _ensure_host_acl grant (merged in from
         # #22) adds a PUT and the fast-path call-count assertion below would
         # measure the ACL grant instead of the symlink logic under test here.
-        return { nsid => 9, acl => { values => ['nqn.host.local'] } }
+        return { nsid => 9, acl => { values => ['nqn.host.local'] },
+                 labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'node-a' } ] }
             if $method eq 'GET' && $path =~ m{/api/v2/volumes/\Q$UUID\E};
         return {};
     };
     use warnings 'redefine';
 }
 
-my $scfg = { lb_project => 'default', lb_api_host => '10.0.0.1:443' };
+my $scfg = { lb_project => 'default', lb_api_host => '10.0.0.1:443', lb_owner_id => 'node-a' };
 
 # ── _ns_matches / _symlink_ns unit behaviour ───────────────────────────────────
 ok( $P->can('_ns_matches') && $P->can('_symlink_ns') && $P->can('_symlink_is_current'),

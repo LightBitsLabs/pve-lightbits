@@ -85,11 +85,28 @@ You need to collect three values before installation:
 | **API endpoint(s)** | IP or hostname of one or more Lightbits nodes, port 443. Example: `192.168.10.10:443`. List every management node you want failover across as a comma-separated `lb_api_host` (e.g. `192.168.10.10:443,192.168.10.11:443`) — the plugin tries each one on a connection failure or 5xx, so the storage keeps working even if one node is down. Failover only advances to the next endpoint for these retryable failures: a 4xx is treated as a definitive answer (every endpoint fronts the same cluster state) and stops there, and mutating calls (create/update/delete) are only tried against one endpoint per call, since a 5xx from those can arrive after the request already took effect. |
 | **JWT token** | Found at `/etc/lbcli/lbcli.yml` on the cluster management node, or generated with `lbcli create jwt`. |
 | **NVMe-oF data endpoint(s)** | Same IP(s) as the API nodes, port 4420. Example: `192.168.10.10:4420`. List **every data node** on a multi-node cluster as a comma-separated `lb_nvme_host` — this seeds `discovery-client` (see below), which then discovers nodes added to the cluster later on its own. It does **not** proactively drop the connection to a node removed from this list (see the note below) — shrinking the list only fully takes effect once this storage's own connection is cleared, on its next full deactivation. |
-| **Project name** | Optional. Default is `default`. Use a specific project to isolate Proxmox volumes. |
+| **Project name** | Optional. Default is `default`. A dedicated project per Proxmox cluster is the cleanest setup, but sharing a project with other consumers is safe — see [Volumes the plugin does not own](#volumes-the-plugin-does-not-own). |
 
 The subsystem NQN is fetched automatically from the cluster API — you no longer need to look it up manually. If you prefer to pin it explicitly (e.g. for air-gapped environments where the API may be unreachable at connect time), you can still supply `--lb_subsys_nqn`.
 
 > **Note on discovery:** LightOS exposes a standard NVMe-oF Discovery Controller (port 8009), and this plugin uses Lightbits' official [`discovery-client`](https://github.com/LightBitsLabs/discovery-client) daemon to manage NVMe-oF connections rather than calling `nvme connect` itself. On volume activation, the plugin writes `lb_nvme_host`'s endpoints into a `discovery-client` config file (`/etc/discovery-client/discovery.d/lightbits-<storeid>.conf`); `discovery-client` then connects every data node and — unlike a static one-shot connect — keeps that current as cluster nodes are added later, with no config change needed on this host. It does **not** proactively remove connections for *removed* nodes on its own (they go stale) unless the cluster has `ctrlLossTMO` configured (LightOS 3.19.1+), so the plugin still runs an explicit `nvme disconnect` on the last deactivation of a subsystem.
+
+#### Volumes the plugin does not own
+
+The plugin labels every volume it creates with `pveVmid`, `pveVmgenid` and `pveNode` (the node hostname, or `lb_owner_id` if set — set it to the cluster name on a PVE cluster). **Ownership is decided by those labels alone.** A volume in the same LightOS project that does not carry a numeric `pveVmid` *and* a `pveNode` equal to this storage's owner id — one created with `lbcli`, by an application server, by another hypervisor or another PVE cluster — is
+
+- never listed by `pvesm list` or shown in the storage's *VM Disks* view (so it can never appear as an "unused disk" with a *Remove* button),
+- refused by `pvesm free` (the delete task fails with `refusing to delete Lightbits volume … not created by this Proxmox storage`), and
+- refused when attached to a VM by volid (`qm set … --scsiN <storage>:vm-0-<uuid>`), so its ACL is never modified.
+
+Manage such volumes with `lbcli`. Volume names are *not* consulted: an unlabelled volume called `vm-100-…` is still foreign. If a plugin-created volume lost its labels (for example because `lbcli update volume --labels` replaced them — LightOS replaces the whole label set on update), re-adopt it by restoring them:
+
+```bash
+lbcli update volume --project-name <project> --uuid <volume-uuid> \
+  --labels pveVmid=<vmid>,pveNode=<owner-id>      # owner-id = lb_owner_id, or the node hostname if unset
+```
+
+This also means a LightOS project can be shared between Proxmox and other workloads: the plugin cannot touch what it did not create. Validated end-to-end on a pre-populated 3-node LightOS 3.20.1 cluster (`t/e2e/foreign_volumes.sh`).
 
 #### Getting a JWT token
 
