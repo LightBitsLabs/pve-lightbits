@@ -5,8 +5,8 @@
 # Node-aware ownership: when several Proxmox hypervisors share one Lightbits
 # project, list_images must only ever return volumes owned by THIS node, so a
 # VM destroy here can never delete another hypervisor's same-numbered VM disks.
-# Volumes are scoped via the pveNode label; legacy volumes without labels are
-# treated as this node's, for backward compatibility.
+# Volumes are scoped via the pveNode label; a volume without the plugin's
+# labels is not ours at all, however it is named.
 
 use strict;
 use warnings;
@@ -29,7 +29,7 @@ my @vols = (
       name => 'vm-100-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb-disk-0',
       labels => [ { key => 'pveVmid', value => '100' },
                   { key => 'pveNode', value => 'node-b' } ] },
-    # legacy unlabeled VM 100 disk (pre-feature) -> treated as this node's
+    # unlabeled volume that merely LOOKS like a VM 100 disk -> not ours
     { UUID => '33333333-3333-3333-3333-333333333333', size => 1, name => 'vm-100-disk' },
 );
 
@@ -53,8 +53,8 @@ sub vols {
     my $o = vols(100);
     ok(  exists $o->{$A}, "this node's vm-100 disk is listed" );
     ok( !exists $o->{$B}, "another node's vm-100 disk is NOT listed (no cross-hypervisor delete)" );
-    ok(  exists $o->{$L}, "legacy unlabeled vm-100 disk is listed (backward compat)" );
-    is( scalar keys %$o, 2, "only this node's two vm-100 volumes are returned" );
+    ok( !exists $o->{$L}, "an unlabeled vm-100-named volume is NOT listed (no name-based ownership)" );
+    is( scalar keys %$o, 1, "only this node's labelled vm-100 volume is returned" );
 }
 
 # --- Full listing never exposes another node's volumes -------------------------
@@ -62,7 +62,7 @@ sub vols {
     my $o = vols(undef);
     ok( !exists $o->{$B}, "another node's volume never appears in this node's listing" );
     is( $o->{$A}{vmid}, 100, 'vmid taken from the pveVmid label' );
-    is( $o->{$L}{vmid}, 100, 'vmid parsed from a legacy name' );
+    ok( !exists $o->{$L}, 'the unlabeled look-alike never appears in the full listing either' );
 }
 
 done_testing();

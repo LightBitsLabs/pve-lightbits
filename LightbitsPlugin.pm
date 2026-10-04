@@ -612,6 +612,51 @@ sub _owner_id {
     return $host;
 }
 
+# Labels of a volume as a flat hash (empty when the volume has none).
+sub _vol_labels {
+    my ($vol) = @_;
+    return map { ($_->{key} // '') => $_->{value} } @{ $vol->{labels} // [] };
+}
+
+# Does this volume belong to this Proxmox storage? Everything that lists,
+# activates or deletes a volume goes through here, so a LightOS project that
+# also holds volumes created by other consumers (lbcli, another hypervisor,
+# an application server) is safe to share with Proxmox: those volumes are
+# invisible to PVE and the plugin refuses to touch them even when an operator
+# names one by volid.
+#
+# A volume is ours when, and only when, it carries the plugin's ownership
+# labels: a numeric pveVmid and a pveNode equal to this storage's owner id
+# (another PVE node or cluster sharing the project keeps its own volumes).
+# Every release of this plugin has written these labels on alloc_image, so
+# there is no name-based fallback: a pveNode label alone (a hand-labelled
+# decoy), a different pveNode, or no labels at all -- however the volume is
+# named -- means "not ours". A volume that lost its labels can be re-adopted
+# with `lbcli update volume --labels ...` (see README, "Volumes the plugin
+# does not own").
+sub _is_owned_volume {
+    my ($vol, $owner_id) = @_;
+    my %label = _vol_labels($vol);
+    return 0 unless defined $label{$LBL_NODE} && $label{$LBL_NODE} eq $owner_id;
+    return defined $label{$LBL_VMID} && $label{$LBL_VMID} =~ /^\d+$/ ? 1 : 0;
+}
+
+# Fetch a volume and refuse to proceed unless it is ours (see _is_owned_volume).
+# Returns the volume record; dies naming the volume and the storage's owner id.
+# A volume that no longer exists comes back as an empty hash (_api maps 404 to
+# {}), which is returned as-is so idempotent callers can treat it as "gone".
+sub _owned_volume_or_die {
+    my ($scfg, $project, $uuid, $what) = @_;
+    my $vol = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+    return $vol unless %$vol;
+    my $owner_id = _owner_id($scfg);
+    return $vol if _is_owned_volume($vol, $owner_id);
+    my $name = $vol->{name} // '?';
+    die "refusing to $what Lightbits volume $uuid ('$name', project '$project'): "
+      . "it was not created by this Proxmox storage (owner id '$owner_id') "
+      . "- missing or foreign ownership labels. Manage it with lbcli instead.\n";
+}
+
 # Generate a random v4-ish UUID, used as a fallback per-VM identity.
 sub _gen_uuid {
     if (open(my $fh, '<', '/proc/sys/kernel/random/uuid')) {
@@ -677,12 +722,13 @@ sub list_images {
     for my $vol (@{$data->{volumes} // []}) {
         my $uuid  = $vol->{UUID};
         my $name  = $vol->{name} // '';
-        my %label = map { ($_->{key} // '') => $_->{value} } @{$vol->{labels} // []};
+        my %label = _vol_labels($vol);
 
-        # Node-aware: never list (and therefore never let Proxmox delete) a
-        # volume owned by a different hypervisor. Foreign volumes with no
-        # pveNode label are treated as this node's, for backward compatibility.
-        next if defined $label{$LBL_NODE} && $label{$LBL_NODE} ne $owner_id;
+        # Never list (and therefore never let Proxmox free, or show as an
+        # "unused disk") a volume that is not this storage's: another
+        # hypervisor's, or one created outside Proxmox altogether
+        # (see _is_owned_volume).
+        next unless _is_owned_volume($vol, $owner_id);
 
         # Owner VM id: prefer the label, else parse the Lightbits name. Volumes
         # with no owner use 0 so PVE never indexes its VM list with an undef key.
@@ -835,6 +881,18 @@ sub free_image {
     my $project = _project($scfg);
     my $uuid    = _vol_uuid($volname);
 
+    # Ownership guard: only volumes this storage created may be deleted from
+    # Proxmox. An operator can hand any volid to `pvesm free`; without this
+    # check that deleted a volume (and its snapshots) belonging to another
+    # consumer of the same LightOS project. A volume that is already gone is
+    # not an error (idempotent delete, as before).
+    my $vol = _owned_volume_or_die($scfg, $project, $uuid, 'delete');
+    unless (%$vol) {
+        my $link = _symlink_path($storeid, $uuid);
+        unlink $link if -l $link;
+        return undef;
+    }
+
     # Delete the volume's snapshots first: a deleted volume's snapshots are not
     # removed with it, so leaving them behind would hold space and reserve names.
     # Best-effort — a snapshot that unexpectedly can't be deleted is warned about
@@ -916,7 +974,10 @@ sub activate_volume {
     # Fetch volume metadata. This runs before the "already active" check below
     # because that check needs the nsid to tell a still-valid symlink from one
     # left over from a previous activation (see _symlink_is_current).
-    my $vol  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+    # Ownership guard first: activating a volume rewrites its ACL (below), so
+    # a foreign volume named by volid must be refused before anything is sent.
+    my $vol = _owned_volume_or_die($scfg, $project, $uuid, 'activate');
+    die "Lightbits volume $uuid not found in project '$project'\n" unless %$vol;
     my $nsid = $vol->{nsid} or die "Cannot determine NSID for volume $uuid\n";
 
     # Grant this host access before waiting for its device: alloc_image only
