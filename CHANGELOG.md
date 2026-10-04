@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **REST calls now fail over to the next `lb_api_host` endpoint on a transport-level failure for every method, mutations included.** `_api` chose a random start endpoint and let POST/PUT/DELETE die on the first failure of any kind, including LWP's synthetic "Internal response" for *connection refused / timeout / TLS error* — a failure that never reached the cluster and is therefore always safe to retry elsewhere. Reproduced live on 2026-10-04 during a single-node LightOS API outage on a 3-node cluster: with two of six configured endpoints on the dead node, about a third of all snapshot, rollback and snapshot-delete calls failed with `500 Can't connect to <host>:443 (Connection refused)`, each one leaving its VM locked (`lock=snapshot-delete` / `lock=rollback`) until an operator ran `qm unlock`. The rule that a *genuine* 5xx from the cluster is not retried for mutating calls (it may arrive after the mutation took effect) is unchanged.
+
 ## [0.9.4] - 2026-10-04 - Tech Preview
 
 Tech Preview release. Makes the plugin safe to point at a LightOS project that already holds other consumers' volumes: everything the plugin lists, sizes, activates, resizes, snapshots or deletes must carry its own ownership labels, so a shared project can no longer lose a foreign volume to a `pvesm free` or have its ACL rewritten by an attach. Validated end-to-end on a 2-node Proxmox VE 9.2.21 cluster against a pre-populated 3-node LightOS 3.20.1 cluster, including the upstream Storage Plugin Test Suite (20 validated, 0 failed), but still ahead of production readiness.

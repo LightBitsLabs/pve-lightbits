@@ -120,8 +120,10 @@ is( scalar(@calls), 0, 'no request attempted when lb_api_host is unset' );
 #    top of this file, which tries every endpoint before giving up). ──────────
 for my $method (qw(POST PUT DELETE)) {
     reset_calls();
+    # a genuine 5xx *from the cluster*: no Client-Warning header (that header
+    # marks LWP's own synthetic responses for transport failures, see below)
     %responses = map {
-        $_ => HTTP::Response->new(500, 'error', ['Client-Warning' => 'Internal response'], '')
+        $_ => HTTP::Response->new(500, 'Internal Server Error', [], '{"code":13}')
     } ('10.0.0.1:443', '10.0.0.2:443', '10.0.0.3:443');
     $err = eval {
         PVE::Storage::Custom::LightbitsPlugin::_api(
@@ -129,8 +131,46 @@ for my $method (qw(POST PUT DELETE)) {
             $method eq 'GET' ? undef : { name => 'vol' });
         1;
     };
-    ok( !$err, "a 5xx on $method propagates as an error instead of retrying" );
+    ok( !$err, "a cluster 5xx on $method propagates as an error instead of retrying" );
     is( scalar(@calls), 1, "$method is tried against exactly one endpoint, never a second" );
+}
+
+# ── a TRANSPORT failure (connection refused, timeout, TLS error: LWP's synthetic
+#    "Internal response") never reached the cluster, so it is safe to try the
+#    next endpoint for every method, mutations included. Seen live 2026-10-04:
+#    with one LightOS node's api-service down, a third of all snapshot /
+#    rollback / delete calls died on "Connection refused" instead of failing
+#    over, leaving VMs locked. ────────────────────────────────────────────────
+for my $method (qw(POST PUT DELETE)) {
+    # every endpoint refuses -> all tried once, then dies naming them all
+    reset_calls();
+    %responses = map {
+        $_ => HTTP::Response->new(500, "Can't connect", ['Client-Warning' => 'Internal response'], '')
+    } ('10.0.0.1:443', '10.0.0.2:443', '10.0.0.3:443');
+    $err = eval {
+        PVE::Storage::Custom::LightbitsPlugin::_api(
+            scfg('10.0.0.1:443,10.0.0.2:443,10.0.0.3:443'), $method, '/x', { name => 'vol' });
+        1;
+    };
+    ok( !$err, "$method dies when every endpoint refuses the connection" );
+    is( scalar(@calls), 3, "$method with connection refused everywhere tried all three endpoints" );
+
+    # one endpoint refuses, the others answer -> the call succeeds via a live one
+    reset_calls();
+    %responses = (
+        '10.0.0.1:443' => HTTP::Response->new(500, "Can't connect", ['Client-Warning' => 'Internal response'], ''),
+        '10.0.0.2:443' => HTTP::Response->new(200, 'OK', ['Content-Type' => 'application/json'], '{"UUID":"u1"}'),
+        '10.0.0.3:443' => HTTP::Response->new(200, 'OK', ['Content-Type' => 'application/json'], '{"UUID":"u1"}'),
+    );
+    my $res = eval {
+        PVE::Storage::Custom::LightbitsPlugin::_api(
+            scfg('10.0.0.1:443,10.0.0.2:443,10.0.0.3:443'), $method, '/x', { name => 'vol' });
+    };
+    is( $@, '', "$method succeeds when one endpoint refuses and another answers" );
+    is( $res->{UUID}, 'u1', "  ...and returns the live endpoint's answer" );
+    ok( scalar(@calls) <= 2 && scalar(@calls) >= 1, "  ...after at most one failed attempt (random start)" );
+    ok( !(grep { $_ eq '10.0.0.1:443' } @calls) || $calls[-1] ne '10.0.0.1:443',
+        "  ...never ending on the refusing endpoint" );
 }
 
 # HEAD is retried like GET (both side-effect-free) — same all-failing setup as

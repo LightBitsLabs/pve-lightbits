@@ -83,9 +83,17 @@ sub _api {
 
         push @errors, "Lightbits API $method $path failed via $host: "
             . $res->status_line . " - " . $res->content . "\n";
-        my $retryable_method = $method =~ /^(?:GET|HEAD)$/;
-        die $errors[-1] unless $retryable_method
-            && ($res->code >= 500 || ($res->header('Client-Warning') // '') eq 'Internal response');
+        # A transport-level failure (connection refused, timeout, TLS error) is
+        # LWP's synthetic "Internal response": no request reached the cluster,
+        # so trying the next endpoint is safe for EVERY method. A genuine 5xx
+        # from the cluster is retried only for read methods — a mutating call
+        # may already have taken effect when its 5xx arrives. Seen live
+        # 2026-10-04: with one of three LightOS nodes' API down, a third of all
+        # snapshot/rollback/delete calls died on "Connection refused" instead of
+        # failing over, leaving VMs locked.
+        my $transport_failure = ($res->header('Client-Warning') // '') eq 'Internal response';
+        my $retryable_method  = $method =~ /^(?:GET|HEAD)$/;
+        die $errors[-1] unless $transport_failure || ($retryable_method && $res->code >= 500);
     }
     die join('', @errors);
 }
