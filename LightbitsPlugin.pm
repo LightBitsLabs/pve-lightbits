@@ -1048,7 +1048,15 @@ sub activate_volume {
         unless $dev;
 
     make_path("$SYMLINK_DIR/$storeid");
-    symlink($dev, $link) or die "Cannot create symlink $link -> $dev: $!\n";
+    # Two concurrent activations of the same volume (parallel full clones from
+    # one template, seen live 2026-10-04) race between the "already current"
+    # check above and this symlink(): the loser gets EEXIST although the link
+    # now points at the right namespace. Treat that as success.
+    unless (symlink($dev, $link)) {
+        my $err = $!;
+        return 1 if _symlink_is_current($link, $subsys_nqn, $nsid);
+        die "Cannot create symlink $link -> $dev: $err\n";
+    }
 
     return 1;
 }
