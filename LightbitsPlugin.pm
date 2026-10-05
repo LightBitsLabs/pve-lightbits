@@ -213,6 +213,25 @@ sub _dsc_conf_lines {
     return @lines;
 }
 
+# Seconds to wait for discovery-client to connect after its config was written
+# before nudging it, and the total wait before giving up. Overridable in tests.
+our $DSC_NUDGE_AFTER  = 10;
+our $DSC_CONNECT_WAIT = 45;
+
+# Restart discovery-client so it re-reads $DSC_CONF_DIR and connects. Used only
+# when the daemon ignored a (re)written config for $DSC_NUDGE_AFTER seconds
+# (see activate_volume). Best-effort: a failed restart is reported but the
+# activation keeps waiting and then fails with its own, more useful, message.
+sub _nudge_discovery_client {
+    my ($storeid, $subsys_nqn) = @_;
+    warn "Lightbits storage '$storeid': discovery-client has not connected to "
+       . "$subsys_nqn ${DSC_NUDGE_AFTER}s after its config was written; "
+       . "restarting discovery-client so it re-reads " . _dsc_conf_path($storeid) . "\n";
+    my $rc = system('systemctl', 'restart', 'discovery-client');
+    warn "Lightbits storage '$storeid': 'systemctl restart discovery-client' failed (rc=$rc)\n" if $rc != 0;
+    return $rc == 0 ? 1 : 0;
+}
+
 # Atomically create/replace this storage's discovery-client config file. The
 # temp file is written in $DSC_ROOT_DIR — outside the watched directory — and
 # moved into place with rename(2), a single atomic filesystem operation, so
@@ -1042,9 +1061,23 @@ sub activate_volume {
     # added later, unlike a one-shot connect loop.
     _write_dsc_conf($storeid, $scfg, _host_nqn(), $subsys_nqn);
 
-    # Wait for a path to the subsystem to come up.
-    for my $attempt (1..30) {
+    # Wait for a path to the subsystem to come up. discovery-client is supposed
+    # to pick the (re)written config up via inotify, but after a full teardown
+    # — the plugin's own `nvme disconnect` on the last deactivation, i.e. the
+    # first VM start on a "cold" node — it reliably did not (validated 2026-10-04
+    # on LightOS 3.20.1: no reconnect for 9+ minutes, every retry failing after
+    # the 60 s wait, while `systemctl restart discovery-client` made the very
+    # next activation succeed). So if no connection shows up within
+    # $DSC_NUDGE_AFTER seconds, nudge the daemon once and keep waiting; the
+    # restart is harmless for running guests because the kernel owns the
+    # existing connections (survives even `kill -9` of discovery-client).
+    my $nudged = 0;
+    for my $attempt (1..$DSC_CONNECT_WAIT) {
         last if _is_connected($subsys_nqn);
+        if (!$nudged && $attempt >= $DSC_NUDGE_AFTER) {
+            _nudge_discovery_client($storeid, $subsys_nqn);
+            $nudged = 1;
+        }
         sleep 1;
     }
 

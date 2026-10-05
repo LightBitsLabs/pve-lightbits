@@ -118,6 +118,7 @@ for my $k (qw(foreign decoy other_pve allowany legacy)) {
     local *PVE::Storage::Custom::LightbitsPlugin::_nvme_endpoints = sub { () };
     local *PVE::Storage::Custom::LightbitsPlugin::_connected_endpoints = sub { {} };
     local *PVE::Storage::Custom::LightbitsPlugin::_is_connected = sub { 0 };
+    local *PVE::Storage::Custom::LightbitsPlugin::_nudge_discovery_client = sub { 1 };   # never run systemctl in unit tests
     local *PVE::Storage::Custom::LightbitsPlugin::_find_nvme_device = sub { undef };
     local *PVE::Storage::Custom::LightbitsPlugin::_write_dsc_conf = sub { 1 };
     use warnings 'redefine', 'once';

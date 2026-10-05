@@ -109,6 +109,7 @@ my $uuid    = 'feedface-0000-4000-8000-000000000abc';
     local *PVE::Storage::Custom::LightbitsPlugin::_nvme_endpoints = sub { () };
     local *PVE::Storage::Custom::LightbitsPlugin::_connected_endpoints = sub { {} };
     local *PVE::Storage::Custom::LightbitsPlugin::_is_connected = sub { 0 };
+    local *PVE::Storage::Custom::LightbitsPlugin::_nudge_discovery_client = sub { 1 };   # never run systemctl in unit tests
     local *PVE::Storage::Custom::LightbitsPlugin::_find_nvme_device = sub { push @events, 'device-probe'; undef };
     use warnings 'redefine', 'once';
 
