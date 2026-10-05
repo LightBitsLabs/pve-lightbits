@@ -135,17 +135,17 @@ for my $method (qw(POST PUT DELETE)) {
     is( scalar(@calls), 1, "$method is tried against exactly one endpoint, never a second" );
 }
 
-# ── a TRANSPORT failure (connection refused, timeout, TLS error: LWP's synthetic
-#    "Internal response") never reached the cluster, so it is safe to try the
-#    next endpoint for every method, mutations included. Seen live 2026-10-04:
-#    with one LightOS node's api-service down, a third of all snapshot /
-#    rollback / delete calls died on "Connection refused" instead of failing
-#    over, leaving VMs locked. ────────────────────────────────────────────────
+# ── a CONNECT failure (refused, connect timeout, unresolvable: LWP's synthetic
+#    "Internal response" whose text starts "Can't connect to") never delivered
+#    the request, so the next endpoint is safe for every method, mutations
+#    included. Seen live 2026-10-04: with one LightOS node's api-service down,
+#    a third of all snapshot / rollback / delete calls died on "Connection
+#    refused" instead of failing over, leaving VMs locked. ───────────────────
 for my $method (qw(POST PUT DELETE)) {
     # every endpoint refuses -> all tried once, then dies naming them all
     reset_calls();
     %responses = map {
-        $_ => HTTP::Response->new(500, "Can't connect", ['Client-Warning' => 'Internal response'], '')
+        $_ => HTTP::Response->new(500, "Can't connect to $_ (Connection refused)", ['Client-Warning' => 'Internal response'], '')
     } ('10.0.0.1:443', '10.0.0.2:443', '10.0.0.3:443');
     $err = eval {
         PVE::Storage::Custom::LightbitsPlugin::_api(
@@ -158,7 +158,7 @@ for my $method (qw(POST PUT DELETE)) {
     # one endpoint refuses, the others answer -> the call succeeds via a live one
     reset_calls();
     %responses = (
-        '10.0.0.1:443' => HTTP::Response->new(500, "Can't connect", ['Client-Warning' => 'Internal response'], ''),
+        '10.0.0.1:443' => HTTP::Response->new(500, "Can't connect to 10.0.0.1:443 (Connection refused)", ['Client-Warning' => 'Internal response'], ''),
         '10.0.0.2:443' => HTTP::Response->new(200, 'OK', ['Content-Type' => 'application/json'], '{"UUID":"u1"}'),
         '10.0.0.3:443' => HTTP::Response->new(200, 'OK', ['Content-Type' => 'application/json'], '{"UUID":"u1"}'),
     );
@@ -171,7 +171,35 @@ for my $method (qw(POST PUT DELETE)) {
     ok( scalar(@calls) <= 2 && scalar(@calls) >= 1, "  ...after at most one failed attempt (random start)" );
     ok( !(grep { $_ eq '10.0.0.1:443' } @calls) || $calls[-1] ne '10.0.0.1:443',
         "  ...never ending on the refusing endpoint" );
+
+    # a transport failure AFTER the request may have been delivered (read
+    # timeout, reset mid-exchange) is NOT safe to retry for a mutation: the
+    # server may already have acted on it. Single attempt, error propagates.
+    for my $text ('read timeout', 'write failed: Broken pipe', 'Connection reset by peer') {
+        reset_calls();
+        %responses = map {
+            $_ => HTTP::Response->new(500, $text, ['Client-Warning' => 'Internal response'], '')
+        } ('10.0.0.1:443', '10.0.0.2:443', '10.0.0.3:443');
+        $err = eval {
+            PVE::Storage::Custom::LightbitsPlugin::_api(
+                scfg('10.0.0.1:443,10.0.0.2:443,10.0.0.3:443'), $method, '/x', { name => 'vol' });
+            1;
+        };
+        ok( !$err, "$method with '$text' propagates the error" );
+        is( scalar(@calls), 1, "  ...after exactly one attempt (the request may have been delivered)" );
+    }
 }
+
+# GET still retries any transport failure, read timeouts included (idempotent)
+reset_calls();
+%responses = (
+    '10.0.0.1:443' => HTTP::Response->new(500, 'read timeout', ['Client-Warning' => 'Internal response'], ''),
+    '10.0.0.2:443' => HTTP::Response->new(200, 'OK', ['Content-Type' => 'application/json'], '{"k":1}'),
+    '10.0.0.3:443' => HTTP::Response->new(200, 'OK', ['Content-Type' => 'application/json'], '{"k":1}'),
+);
+my $g = eval { PVE::Storage::Custom::LightbitsPlugin::_api(scfg('10.0.0.1:443,10.0.0.2:443,10.0.0.3:443'), 'GET', '/x') };
+is( $@, '', 'GET succeeds past a read-timeout endpoint' );
+is( $g->{k}, 1, '  ...with the live endpoint\'s answer' );
 
 # HEAD is retried like GET (both side-effect-free) — same all-failing setup as
 # the GET case at the top of this file, just with a different method.
