@@ -435,6 +435,9 @@ cat /etc/nvme/hostnqn   # should print a nqn.* string
 
 ### `Block device for volume <uuid> (nsid=N) did not appear`
 
+**Cold node (first VM start after the last Lightbits volume on this node was deactivated):** the plugin disconnects the subsystem on the last deactivation and discovery-client did not reliably act on the re-created config file afterwards. Since the version carrying this note, `activate_volume` restarts discovery-client itself when no connection appears within 10 s and logs `discovery-client has not connected … restarting discovery-client` in the task; a start that still fails after that points at a real connectivity or ACL problem. Keeping one always-on VM with a Lightbits disk per node (a "keeper") is no longer required to avoid this, but still avoids the ~10 s restart delay on the first start.
+
+
 The NVMe-oF connect never happened or the block device didn't show up. Check:
 
 ```bash
