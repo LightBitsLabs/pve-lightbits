@@ -7,14 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-10-05 - Tech Preview
+
+Tech Preview release. Three control-plane fixes found by a two-day reliability validation on a 2-node Proxmox VE 9.2.21 cluster against a 3-node LightOS 3.20.1 cluster (live migration, HA fencing, node power-cut, data-leg partition, LightOS node stop and rolling restart, 5 h of lifecycle churn): a node whose last Lightbits volume was deactivated can start its next VM again without operator help, parallel full clones from one template no longer race on the shared source volume, and mutating REST calls fail over to another `lb_api_host` endpoint when a LightOS API node is down. The data path recorded zero `fio --verify` errors through every fault, before and after the fixes. Still ahead of production readiness.
+
 ### Fixed
 
 - **First VM start on a "cold" node no longer fails.** When the last Lightbits volume on a node is deactivated the plugin disconnects the NVMe subsystem and removes its discovery-client config; on the next activation it rewrites the config and waits for discovery-client to connect — which, after such a full teardown, discovery-client did not do (LightOS 3.20.1 `discovery-client 3.20.1b29846522522-1`, validated 2026-10-04: no reconnect for 9+ minutes, every `qm start` failing with `Block device for volume … did not appear` after the 60 s wait, while a `systemctl restart discovery-client` made the next start succeed at once). `activate_volume` now restarts discovery-client if no connection appears within 10 s of writing the config (`$DSC_NUDGE_AFTER`), once, and keeps waiting up to 45 s in total (`$DSC_CONNECT_WAIT`), logging why. The restart is harmless for running guests: NVMe connections are owned by the kernel and survive even `kill -9` of the daemon. Affects the first VM start after maintenance, an HA evacuation or a reboot without `onboot` guests — anywhere a keeper VM is not kept running.
-
-### Fixed
-
 - **Concurrent activations of the same volume no longer fail with `Cannot create symlink …: File exists`.** Parallel full clones from one template activate the shared source volume at the same time; `activate_volume` checked "symlink already current", unlinked, then called `symlink()` with no tolerance for a racing creator, so the loser died although the link now pointed at the right namespace (1 of 3 parallel clones failed live on 2026-10-04). An `EEXIST` whose link resolves to the correct namespace is now success; a link to a different device is still an error.
 - **REST calls now fail over to the next `lb_api_host` endpoint when the connection could not be established, for every method, mutations included.** `_api` chose a random start endpoint and let POST/PUT/DELETE die on the first failure of any kind, including LWP's synthetic "Internal response" for *connection refused / timeout / TLS error* — a failure that never reached the cluster and is therefore safe to retry elsewhere. Only connect-level failures (`Can't connect to …`, TLS handshake) qualify for mutating calls; a read timeout or a reset after the request was written may already have taken effect and stays single-shot, as does any real 5xx. Reproduced live on 2026-10-04 during a single-node LightOS API outage on a 3-node cluster: with two of six configured endpoints on the dead node, about a third of all snapshot, rollback and snapshot-delete calls failed with `500 Can't connect to <host>:443 (Connection refused)`, each one leaving its VM locked (`lock=snapshot-delete` / `lock=rollback`) until an operator ran `qm unlock`. The rule that a *genuine* 5xx from the cluster is not retried for mutating calls (it may arrive after the mutation took effect) is unchanged.
+
+### Added
+
+- `t/activate_volume_cold_node.t`, `t/activate_volume_race.t` and the extended `t/api_failover.t` (unit): no nudge while discovery-client connects on its own, exactly one nudge then success, unchanged failure when nothing helps; a racing creator of the correct symlink is tolerated and a wrong one is not; connect-level failures fail over for every method while read timeouts, resets and genuine 5xx stay single-shot for mutations.
 
 ## [0.9.4] - 2026-10-04 - Tech Preview
 
