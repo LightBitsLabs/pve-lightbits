@@ -25,6 +25,9 @@ my $P     = 'PVE::Storage::Custom::LightbitsPlugin';
 my $dir   = tempdir(CLEANUP => 1);
 my $uuid  = 'feedface-0000-4000-8000-000000000abc';
 my $link  = "$dir/$uuid";
+# keep every filesystem side effect inside the temp dir: CI runs unprivileged
+# and activate_volume creates "$SYMLINK_DIR/<storeid>" before linking
+$PVE::Storage::Custom::LightbitsPlugin::SYMLINK_DIR = $dir;
 my $scfg  = { lb_project => 'default', lb_owner_id => 'node-a' };
 my $vol   = { nsid => 7, acl => { values => ['nqn.host.local'] },
               labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'node-a' } ] };
