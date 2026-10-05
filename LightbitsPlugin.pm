@@ -83,11 +83,33 @@ sub _api {
 
         push @errors, "Lightbits API $method $path failed via $host: "
             . $res->status_line . " - " . $res->content . "\n";
-        my $retryable_method = $method =~ /^(?:GET|HEAD)$/;
-        die $errors[-1] unless $retryable_method
-            && ($res->code >= 500 || ($res->header('Client-Warning') // '') eq 'Internal response');
+        # Read methods are retried on any transport failure (LWP's synthetic
+        # "Internal response") or genuine 5xx. Mutating calls are retried on the
+        # next endpoint ONLY when the failure provably happened before the
+        # request was delivered — LWP's "Can't connect to host:port" (refused,
+        # connect timeout, unresolvable) or a failed TLS handshake. A read
+        # timeout or a reset after the request was written, and any real 5xx,
+        # may mean the mutation already took effect, so those stay single-shot.
+        # Seen live 2026-10-04: with one of three LightOS nodes' API down, a
+        # third of all snapshot/rollback/delete calls died on "Connection
+        # refused" instead of failing over, leaving VMs locked.
+        my $transport_failure = ($res->header('Client-Warning') // '') eq 'Internal response';
+        my $retryable_method  = $method =~ /^(?:GET|HEAD)$/;
+        die $errors[-1] unless ($retryable_method && ($transport_failure || $res->code >= 500))
+            || _failed_before_send($res);
     }
     die join('', @errors);
+}
+
+# True only for LWP's synthetic responses whose error text proves the request
+# never left this host: the connect itself failed (refused, connect timeout, no
+# route, name resolution) or the TLS handshake failed. Anything else — a read
+# timeout, "write failed", a reset mid-exchange — may have reached the server.
+sub _failed_before_send {
+    my ($res) = @_;
+    return 0 unless ($res->header('Client-Warning') // '') eq 'Internal response';
+    my $text = $res->status_line . ' ' . ($res->content // '');
+    return $text =~ /Can't connect to |SSL (?:upgrade|connect attempt) failed|Name or service not known/ ? 1 : 0;
 }
 
 # GET a resource that the caller is about to read fields out of, failing
@@ -1040,7 +1062,15 @@ sub activate_volume {
         unless $dev;
 
     make_path("$SYMLINK_DIR/$storeid");
-    symlink($dev, $link) or die "Cannot create symlink $link -> $dev: $!\n";
+    # Two concurrent activations of the same volume (parallel full clones from
+    # one template, seen live 2026-10-04) race between the "already current"
+    # check above and this symlink(): the loser gets EEXIST although the link
+    # now points at the right namespace. Treat that as success.
+    unless (symlink($dev, $link)) {
+        my $err = $!;
+        return 1 if _symlink_is_current($link, $subsys_nqn, $nsid);
+        die "Cannot create symlink $link -> $dev: $err\n";
+    }
 
     return 1;
 }
