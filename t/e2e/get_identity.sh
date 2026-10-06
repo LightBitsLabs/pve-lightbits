@@ -45,7 +45,7 @@ fi
 scfg_val() {
     awk -v s="$1" -v k="$2" '
         /^[a-z]+: /   { in_blk = ($0 == "lightbits: " s) ; next }
-        in_blk && $1 == k { print $2; exit }' /etc/pve/storage.cfg
+        in_blk && $1 == k { sub(/^[ \t]*[^ \t]+[ \t]+/, ""); print; exit }' /etc/pve/storage.cfg
 }
 API_HOSTS="$(scfg_val "$STORAGE" lb_api_host)"
 JWT="$(scfg_val "$STORAGE" lb_jwt)"
@@ -69,20 +69,28 @@ cleanup() {
 trap cleanup EXIT
 
 # A different spelling of the same endpoint set: reverse the order, uppercase,
-# and drop one explicit :443 (the plugin always speaks HTTPS, so a bare host
-# and host:443 are the same endpoint).
+# and toggle the default-port spelling of one endpoint (the plugin always
+# speaks HTTPS, so a bare host and host:443 are the same endpoint): an
+# explicit :443 is dropped, a bare host (or bare [IPv6]) gains :443. Aborts if
+# no endpoint can be toggled (all on a non-default port), so the test never
+# claims port-spelling coverage it did not exercise.
 TWIN_HOSTS="$(python3 - "$API_HOSTS" <<'EOF'
-import sys
+import re, sys
 eps = [e.strip() for e in sys.argv[1].split(",") if e.strip()]
 eps.reverse()
 eps = [e.upper() for e in eps]
 for i, e in enumerate(eps):
-    if e.endswith(":443") and not e.startswith("["):
+    if e.endswith(":443"):                      # host:443 or [v6]:443 -> implicit
         eps[i] = e[: -len(":443")]
         break
+    if re.fullmatch(r"\[[^\]]+\]", e) or ":" not in e:   # bare [v6] or bare host -> explicit
+        eps[i] = e + ":443"
+        break
+else:
+    sys.exit("ABORT: no endpoint on the default port to toggle in lb_api_host=" + sys.argv[1])
 print(",".join(eps))
 EOF
-)"
+)" || { echo "$TWIN_HOSTS" >&2; exit 1; }
 echo "== twin spelling: $TWIN_HOSTS =="
 
 pvesm add lightbits "$TWIN_STORAGE" \

@@ -65,7 +65,7 @@ scfg_val() {
     awk -v s="$1" -v k="$2" '
         $0 ~ "^lightbits: " s "$" { in_blk = 1; next }
         /^[a-z]+: / { in_blk = 0 }
-        in_blk && $1 == k { print $2; exit }' /etc/pve/storage.cfg
+        in_blk && $1 == k { sub(/^[ \t]*[^ \t]+[ \t]+/, ""); print; exit }' /etc/pve/storage.cfg
 }
 API_HOSTS="$(scfg_val "$STORAGE" lb_api_host)"
 JWT="$(scfg_val "$STORAGE" lb_jwt)"
