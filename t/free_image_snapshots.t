@@ -35,6 +35,10 @@ no warnings 'redefine';
     # re-check after a failed delete: report the snapshot still present so the
     # error surfaces (exercises the best-effort warn path)
     return { state => 'Available' } if $method eq 'GET' && $path =~ m{/snapshots/s[ab]$};
+    # ownership guard: the volume being freed is a plugin volume of this storage
+    return { UUID => $UUID, name => "vm-100-$UUID-disk-0", state => 'Available',
+             labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'node-a' } ] }
+        if $method eq 'GET' && $path =~ m{/api/v2/volumes/$UUID\?};
     if ($method eq 'DELETE') {
         push @deleted, $path;
         die $snap_delete_err if $snap_delete_err && $path =~ m{/snapshots/};
@@ -44,7 +48,7 @@ no warnings 'redefine';
 };
 use warnings 'redefine';
 
-my $scfg    = { lb_project => 'default' };
+my $scfg    = { lb_project => 'default', lb_owner_id => 'node-a' };
 my $volname = "vm-100-$UUID";
 
 # ── snapshots deleted first, then the volume; foreign snapshot untouched ───────

@@ -30,11 +30,13 @@ no warnings 'redefine';
         return { UUID => $SUUID };
     }
     return { state => $snap_state } if $method eq 'GET' && $path =~ m{/snapshots/};
+    # ownership guard GET of the source volume
+    return { state => 'Available', labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'node-a' } ] } if $method eq 'GET' && $path =~ m{/api/v2/volumes/};
     return {};
 };
 use warnings 'redefine';
 
-my $scfg    = { lb_project => 'default' };
+my $scfg    = { lb_project => 'default', lb_owner_id => 'node-a' };
 my $volname = "vm-100-$UUID";
 
 # ── POST request shape ─────────────────────────────────────────────────────────

@@ -6,9 +6,11 @@
 #
 # When a VM is destroyed with "purge unreferenced disks", qemu-server calls
 # vdisk_list($cfg, undef, $vmid, ...) -> list_images(..., $vmid, ...) and frees
-# every volume it returns. A volume whose LightOS name has no "vm-<vmid>-"
-# prefix has no owner; it must therefore be reported with a *defined* vmid (0)
-# and must NOT be attributed to — and thus deleted alongside — an unrelated VM.
+# every volume it returns. A volume without the plugin's ownership labels was
+# not created by this plugin (it belongs to another consumer of the project);
+# it must never be listed -- not for any vmid, and not in the unfiltered
+# listing either, where PVE would present it as an "unused disk" with a
+# Remove button -- whatever its name looks like.
 
 use strict;
 use warnings;
@@ -19,13 +21,14 @@ use lib "$FindBin::RealBin/stubs";
 require "$FindBin::RealBin/../LightbitsPlugin.pm";
 
 my $class = 'PVE::Storage::Custom::LightbitsPlugin';
-my $scfg  = { lb_project => 'default' };
+my $scfg  = { lb_project => 'default', lb_owner_id => 'node-a' };
 
-# Mirrors a real cluster: a Proxmox-created disk for VM 100, another VM's disk,
-# and a hand-created volume ("john") that does not follow the vm-<id>- naming.
+# Mirrors a real cluster: a Proxmox-created disk for VM 100, another VM's disk
+# (both carrying the plugin's ownership labels), and a hand-created volume
+# ("john") with no labels.
 my @cluster_volumes = (
-    { UUID => '74754ae7-f30d-4e4d-8b7f-d7240cad6049', name => 'vm-100-disk',      size => 2147483648 },
-    { UUID => '79e42785-5535-47f4-8c88-29e186127dff', name => 'vm-9999-test-vol', size => 4294967296 },
+    { UUID => '74754ae7-f30d-4e4d-8b7f-d7240cad6049', name => 'vm-100-disk',      size => 2147483648, labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'node-a' } ] },
+    { UUID => '79e42785-5535-47f4-8c88-29e186127dff', name => 'vm-9999-test-vol', size => 4294967296, labels => [ { key => 'pveVmid', value => '9999' }, { key => 'pveNode', value => 'node-a' } ] },
     { UUID => 'aed38be7-8d19-44e8-8627-b111079e8aa1', name => 'john',             size => 2040109465 },
 );
 
@@ -64,10 +67,10 @@ sub by_volid {
 # --- Unfiltered listing: every vmid is defined (no uninit-value warning) ----
 {
     my $all = by_volid(undef);
-    is( scalar keys %$all, 3, 'all volumes listed when no vmid filter is given' );
+    is( scalar keys %$all, 2, 'only plugin-owned volumes are listed when no vmid filter is given' );
     ok( defined $all->{$_}{vmid}, "vmid is defined for $_ (avoids uninitialized-value warning)" )
         for sort keys %$all;
-    is( $all->{$john}{vmid},     0,    'unowned volume reports vmid 0' );
+    ok( !exists $all->{$john}, 'a foreign (unlabelled) volume is not listed at all' );
     is( $all->{$disk_100}{vmid}, 100,  'vm-100-disk reports vmid 100' );
     is( $all->{$disk_9999}{vmid}, 9999, 'vm-9999-test-vol reports vmid 9999' );
 }
