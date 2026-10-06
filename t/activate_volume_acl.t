@@ -28,7 +28,7 @@ no warnings 'redefine';
 *PVE::Storage::Custom::LightbitsPlugin::_host_nqn = sub { 'nqn.host.local' };
 use warnings 'redefine';
 
-my $scfg    = { lb_project => 'default' };
+my $scfg    = { lb_project => 'default', lb_owner_id => 'node-a' };
 my $project = 'default';
 my $uuid    = 'feedface-0000-4000-8000-000000000abc';
 
@@ -101,7 +101,7 @@ my $uuid    = 'feedface-0000-4000-8000-000000000abc';
             push @puts,   { method => $method, body => $body };
             push @events, 'acl-put';
         }
-        return { nsid => 5, acl => { values => ['nqn.other-host'] } } if $method eq 'GET';
+        return { nsid => 5, acl => { values => ['nqn.other-host'] }, labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'node-a' } ] } if $method eq 'GET';
         return {};
     };
     local *PVE::Storage::Custom::LightbitsPlugin::_symlink_path = sub { '/nonexistent-link-path' };
@@ -109,6 +109,7 @@ my $uuid    = 'feedface-0000-4000-8000-000000000abc';
     local *PVE::Storage::Custom::LightbitsPlugin::_nvme_endpoints = sub { () };
     local *PVE::Storage::Custom::LightbitsPlugin::_connected_endpoints = sub { {} };
     local *PVE::Storage::Custom::LightbitsPlugin::_is_connected = sub { 0 };
+    local *PVE::Storage::Custom::LightbitsPlugin::_nudge_discovery_client = sub { 1 };   # never run systemctl in unit tests
     local *PVE::Storage::Custom::LightbitsPlugin::_find_nvme_device = sub { push @events, 'device-probe'; undef };
     use warnings 'redefine', 'once';
 

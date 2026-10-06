@@ -39,12 +39,12 @@ no warnings 'redefine';
         %put = (path => $path, body => $body);
         return {};
     }
-    return { state => $vol_state } if $method eq 'GET' && $path =~ m{/volumes/};
+    return { state => $vol_state, labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'node-a' } ] } if $method eq 'GET' && $path =~ m{/volumes/};
     return {};
 };
 use warnings 'redefine';
 
-my $scfg    = { lb_project => 'default' };
+my $scfg    = { lb_project => 'default', lb_owner_id => 'node-a' };
 my $volname = "vm-100-$UUID";
 
 # ── PUT request shape ──────────────────────────────────────────────────────────

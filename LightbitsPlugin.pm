@@ -83,11 +83,33 @@ sub _api {
 
         push @errors, "Lightbits API $method $path failed via $host: "
             . $res->status_line . " - " . $res->content . "\n";
-        my $retryable_method = $method =~ /^(?:GET|HEAD)$/;
-        die $errors[-1] unless $retryable_method
-            && ($res->code >= 500 || ($res->header('Client-Warning') // '') eq 'Internal response');
+        # Read methods are retried on any transport failure (LWP's synthetic
+        # "Internal response") or genuine 5xx. Mutating calls are retried on the
+        # next endpoint ONLY when the failure provably happened before the
+        # request was delivered — LWP's "Can't connect to host:port" (refused,
+        # connect timeout, unresolvable) or a failed TLS handshake. A read
+        # timeout or a reset after the request was written, and any real 5xx,
+        # may mean the mutation already took effect, so those stay single-shot.
+        # Seen live 2026-10-04: with one of three LightOS nodes' API down, a
+        # third of all snapshot/rollback/delete calls died on "Connection
+        # refused" instead of failing over, leaving VMs locked.
+        my $transport_failure = ($res->header('Client-Warning') // '') eq 'Internal response';
+        my $retryable_method  = $method =~ /^(?:GET|HEAD)$/;
+        die $errors[-1] unless ($retryable_method && ($transport_failure || $res->code >= 500))
+            || _failed_before_send($res);
     }
     die join('', @errors);
+}
+
+# True only for LWP's synthetic responses whose error text proves the request
+# never left this host: the connect itself failed (refused, connect timeout, no
+# route, name resolution) or the TLS handshake failed. Anything else — a read
+# timeout, "write failed", a reset mid-exchange — may have reached the server.
+sub _failed_before_send {
+    my ($res) = @_;
+    return 0 unless ($res->header('Client-Warning') // '') eq 'Internal response';
+    my $text = $res->status_line . ' ' . ($res->content // '');
+    return $text =~ /Can't connect to |SSL (?:upgrade|connect attempt) failed|Name or service not known/ ? 1 : 0;
 }
 
 # GET a resource that the caller is about to read fields out of, failing
@@ -189,6 +211,25 @@ sub _dsc_conf_lines {
         push @lines, "-t tcp -a $host -s $DSC_DISCOVERY_PORT -q $host_nqn -n $subsys_nqn";
     }
     return @lines;
+}
+
+# Seconds to wait for discovery-client to connect after its config was written
+# before nudging it, and the total wait before giving up. Overridable in tests.
+our $DSC_NUDGE_AFTER  = 10;
+our $DSC_CONNECT_WAIT = 45;
+
+# Restart discovery-client so it re-reads $DSC_CONF_DIR and connects. Used only
+# when the daemon ignored a (re)written config for $DSC_NUDGE_AFTER seconds
+# (see activate_volume). Best-effort: a failed restart is reported but the
+# activation keeps waiting and then fails with its own, more useful, message.
+sub _nudge_discovery_client {
+    my ($storeid, $subsys_nqn) = @_;
+    warn "Lightbits storage '$storeid': discovery-client has not connected to "
+       . "$subsys_nqn ${DSC_NUDGE_AFTER}s after its config was written; "
+       . "restarting discovery-client so it re-reads " . _dsc_conf_path($storeid) . "\n";
+    my $rc = system('systemctl', 'restart', 'discovery-client');
+    warn "Lightbits storage '$storeid': 'systemctl restart discovery-client' failed (rc=$rc)\n" if $rc != 0;
+    return $rc == 0 ? 1 : 0;
 }
 
 # Atomically create/replace this storage's discovery-client config file. The
@@ -344,8 +385,8 @@ sub _symlink_path {
 # volume isn't mapped on this node; idempotent. Used after operations that change
 # the backing data/size out-of-band (resize, snapshot rollback).
 sub _rescan_controller {
-    my ($storeid, $uuid) = @_;
-    my $link = _symlink_path($storeid, $uuid);
+    my ($storeid, $link_name) = @_;
+    my $link = _symlink_path($storeid, $link_name);
     return unless -l $link;
     my $dev = readlink($link);
     return unless $dev && $dev =~ m{/dev/(nvme\d+)};
@@ -413,7 +454,7 @@ sub _snapshots_for_volume {
 # two (see volume_snapshot_delete).
 sub _snap_uuid {
     my ($scfg, $project, $volname, $pve_snap) = @_;
-    my $vol_uuid = _vol_uuid($volname);
+    my $vol_uuid = _resolve_existing_uuid($scfg, $volname);
     my $want     = _lb_snap_name($vol_uuid, $pve_snap);
     for my $s (@{ _snapshots_for_volume($scfg, $project, $vol_uuid) }) {
         return $s->{UUID} if ($s->{name} // '') eq $want;
@@ -524,6 +565,12 @@ sub parse_volname {
     if ($volname =~ /^(vm-(\d+)-$uuid)\@(.+)$/) {
         return ('images', $1, $2, undef, $3, 0, 'raw');
     }
+    # "vm-<vmid>-cloudinit": the VM's cloud-init drive. qemu-server recognises a
+    # cloud-init drive by this exact name (Drive::drive_is_cloudinit), so it
+    # carries no UUID; the LightOS volume is found by labels (_resolve_uuid).
+    if ($volname =~ /^(vm-(\d+)-cloudinit)(?:\@(.+))?$/) {
+        return ('images', $1, $2, undef, $3, 0, 'raw');
+    }
     die "unable to parse Lightbits volume name '$volname'\n";
 }
 
@@ -629,6 +676,10 @@ our $QEMU_CONF_DIR = '/etc/pve/qemu-server';
 my $LBL_VMID    = 'pveVmid';
 my $LBL_VMGENID = 'pveVmgenid';
 my $LBL_NODE    = 'pveNode';
+# Role of a volume within its VM. Only written for volumes whose PVE-side name
+# cannot carry the LightOS UUID: today the cloud-init drive (see _resolve_uuid).
+my $LBL_ROLE       = 'pveRole';
+my $ROLE_CLOUDINIT = 'cloudinit';
 
 # Identity of this Proxmox node. Volumes are tagged with it so that destroying
 # a VM here can never delete another hypervisor's volumes when several share a
@@ -648,6 +699,147 @@ sub _owner_id {
     my $host = _hostname();
     $host =~ s/\s+//g;
     return $host;
+}
+
+# Labels of a volume as a flat hash (empty when the volume has none).
+sub _vol_labels {
+    my ($vol) = @_;
+    return map { ($_->{key} // '') => $_->{value} } @{ $vol->{labels} // [] };
+}
+
+# Does this volume belong to this Proxmox storage? Everything that lists,
+# activates or deletes a volume goes through here, so a LightOS project that
+# also holds volumes created by other consumers (lbcli, another hypervisor,
+# an application server) is safe to share with Proxmox: those volumes are
+# invisible to PVE and the plugin refuses to touch them even when an operator
+# names one by volid.
+#
+# A volume is ours when, and only when, it carries the plugin's ownership
+# labels: a numeric pveVmid and a pveNode equal to this storage's owner id
+# (another PVE node or cluster sharing the project keeps its own volumes).
+# Every release of this plugin has written these labels on alloc_image, so
+# there is no name-based fallback: a pveNode label alone (a hand-labelled
+# decoy), a different pveNode, or no labels at all -- however the volume is
+# named -- means "not ours". A volume that lost its labels can be re-adopted
+# with `lbcli update volume --labels ...` (see README, "Volumes the plugin
+# does not own").
+sub _is_owned_volume {
+    my ($vol, $owner_id) = @_;
+    my %label = _vol_labels($vol);
+    return 0 unless defined $label{$LBL_NODE} && $label{$LBL_NODE} eq $owner_id;
+    return defined $label{$LBL_VMID} && $label{$LBL_VMID} =~ /^\d+$/ ? 1 : 0;
+}
+
+# Fetch a volume and refuse to proceed unless it is ours (see _is_owned_volume).
+# Every path that mutates or hands out a volume by volid goes through here:
+# volume_size_info, activate_volume, free_image, volume_resize, volume_snapshot,
+# volume_snapshot_delete and volume_snapshot_rollback.
+# Returns the volume record; dies naming the volume and the storage's owner id.
+# A volume that no longer exists comes back as an empty hash (_api maps 404 to
+# {}), which is returned as-is so idempotent callers can treat it as "gone".
+sub _owned_volume_or_die {
+    my ($scfg, $project, $uuid, $what) = @_;
+    my $vol = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+    return $vol unless %$vol;
+    my $owner_id = _owner_id($scfg);
+    return $vol if _is_owned_volume($vol, $owner_id);
+    my $name = $vol->{name} // '?';
+    die "refusing to $what Lightbits volume $uuid ('$name', project '$project'): "
+      . "it was not created by this Proxmox storage (owner id '$owner_id') "
+      . "- missing or foreign ownership labels. Manage it with lbcli instead.\n";
+}
+
+# Same, for callers that also need the volume to exist: a vanished volume is
+# reported with the same wording as _get_existing.
+sub _owned_existing_volume {
+    my ($scfg, $project, $uuid, $what) = @_;
+    my $vol = _owned_volume_or_die($scfg, $project, $uuid, $what);
+    die "Volume $uuid no longer exists on the Lightbits cluster (deleted outside Proxmox?)\n"
+        unless %$vol;
+    return $vol;
+}
+
+# ── Cloud-init volumes ────────────────────────────────────────────────────────
+#
+# qemu-server identifies a VM's cloud-init drive purely by its volume name:
+# Drive::drive_is_cloudinit matches "vm-<vmid>-cloudinit" at the end of the
+# volid, API2::Qemu / clone_disk / restore allocate it by passing exactly that
+# $name to alloc_image, and Cloudinit::commit_cloudinit_disk writes the
+# generated ISO into path() of that volid. A volid of our usual
+# "vm-<vmid>-<uuid>" shape is therefore never treated as cloud-init: PVE writes
+# no ISO into it, the guest boots without user-data, and `qm destroy --purge`
+# leaves the 4 MiB volume behind (reproduced 2026-10-04 with `qm clone --full
+# --storage <lb>` and `qmrestore --storage <lb>`, pve-lightbits issue #41).
+#
+# So for this one drive the plugin honours PVE's name. "vm-<vmid>-cloudinit"
+# has no room for the LightOS UUID, so the volume is found through its labels
+# instead (pveVmid + pveNode + pveRole=cloudinit); the LightOS name itself,
+# "vm-<vmid>-<vmgenid>-cloudinit", stays unique per project like the disks'.
+# Every method that takes a volname goes through _resolve_uuid / _link_name
+# below, so the rest of the plugin keeps working on UUIDs.
+
+# vmid of a cloud-init volname ("vm-<vmid>-cloudinit", optionally
+# "@<snap>"-qualified), or undef for any other volume name.
+sub _cloudinit_vmid {
+    my ($volname) = @_;
+    (my $base = $volname) =~ s/\@.*$//;
+    return $1 if $base =~ /^vm-(\d+)-cloudinit$/;
+    return undef;
+}
+
+# Name of the volume's /dev/lightbits/<storeid>/ symlink: the LightOS UUID for
+# UUID-bearing volnames, the volname itself for a cloud-init drive (so path()
+# and deactivate_volume need no API call to find the link). Untainted.
+sub _link_name {
+    my ($volname) = @_;
+    (my $base = $volname) =~ s/\@.*$//;
+    return $1 if $base =~ /^(vm-\d+-cloudinit)$/;
+    return _vol_uuid($base);
+}
+
+# This storage's cloud-init volume of $vmid: the volume carrying our ownership
+# labels for that VM plus pveRole=cloudinit and not already being deleted.
+# Returns the volume record, or undef when there is none. More than one is a
+# state the plugin never creates (alloc_image refuses a second one) and cannot
+# pick from safely, so it is reported for the operator to resolve.
+sub _find_cloudinit_volume {
+    my ($scfg, $project, $vmid) = @_;
+    my $data     = _api($scfg, 'GET', "/api/v2/volumes?projectName=$project");
+    my $owner_id = _owner_id($scfg);
+    my @found;
+    for my $vol (@{ $data->{volumes} // [] }) {
+        next unless _is_owned_volume($vol, $owner_id);
+        my %label = _vol_labels($vol);
+        next unless ($label{$LBL_ROLE} // '') eq $ROLE_CLOUDINIT;
+        next unless $label{$LBL_VMID} == $vmid;
+        next if ($vol->{state} // '') =~ /^(Deleting|Deleted)$/i;
+        push @found, $vol;
+    }
+    die "VM $vmid has " . scalar(@found) . " cloud-init volumes on this Lightbits storage "
+      . "(project '$project'): " . join(', ', map { "$_->{UUID} ('$_->{name}')" } @found)
+      . ". Remove the stale one(s) with lbcli before continuing.\n"
+        if @found > 1;
+    return $found[0];
+}
+
+# LightOS UUID behind a PVE volname: read straight out of a UUID-bearing name,
+# looked up by labels for a cloud-init drive. undef only for a cloud-init
+# volume that no longer exists (callers that must be idempotent on "already
+# gone" check for it; the rest use _resolve_existing_uuid).
+sub _resolve_uuid {
+    my ($scfg, $volname) = @_;
+    my $vmid = _cloudinit_vmid($volname);
+    return _vol_uuid($volname) unless defined $vmid;
+    my $vol = _find_cloudinit_volume($scfg, _project($scfg), $vmid);
+    return $vol ? $vol->{UUID} : undef;
+}
+
+sub _resolve_existing_uuid {
+    my ($scfg, $volname) = @_;
+    my $uuid = _resolve_uuid($scfg, $volname);
+    die "Volume $volname no longer exists on the Lightbits cluster (deleted outside Proxmox?)\n"
+        unless defined $uuid;
+    return $uuid;
 }
 
 # Generate a random v4-ish UUID, used as a fallback per-VM identity.
@@ -715,12 +907,13 @@ sub list_images {
     for my $vol (@{$data->{volumes} // []}) {
         my $uuid  = $vol->{UUID};
         my $name  = $vol->{name} // '';
-        my %label = map { ($_->{key} // '') => $_->{value} } @{$vol->{labels} // []};
+        my %label = _vol_labels($vol);
 
-        # Node-aware: never list (and therefore never let Proxmox delete) a
-        # volume owned by a different hypervisor. Foreign volumes with no
-        # pveNode label are treated as this node's, for backward compatibility.
-        next if defined $label{$LBL_NODE} && $label{$LBL_NODE} ne $owner_id;
+        # Never list (and therefore never let Proxmox free, or show as an
+        # "unused disk") a volume that is not this storage's: another
+        # hypervisor's, or one created outside Proxmox altogether
+        # (see _is_owned_volume).
+        next unless _is_owned_volume($vol, $owner_id);
 
         # Owner VM id: prefer the label, else parse the Lightbits name. Volumes
         # with no owner use 0 so PVE never indexes its VM list with an undef key.
@@ -733,9 +926,14 @@ sub list_images {
 
         next if defined $vmid && $owner != $vmid;
 
-        # volid embeds the owner vmid (and the Lightbits UUID is the real id).
+        # volid embeds the owner vmid (and the Lightbits UUID is the real id);
+        # a cloud-init drive is listed under the name qemu-server knows it by,
+        # or PVE would see the same volume twice and offer the UUID-named one
+        # as an "unused disk".
+        my $volname = ($label{$LBL_ROLE} // '') eq $ROLE_CLOUDINIT
+            ? "vm-${owner}-cloudinit" : "vm-${owner}-${uuid}";
         push @res, {
-            volid  => "$storeid:vm-${owner}-${uuid}",
+            volid  => "$storeid:$volname",
             format => 'raw',
             size   => int($vol->{size} // 0),
             vmid   => $owner,
@@ -750,11 +948,13 @@ sub list_images {
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
     my $project = _project($scfg);
-    my $uuid    = _vol_uuid($volname);
+    my $uuid    = _resolve_existing_uuid($scfg, $volname);
+    # Ownership guard: this is what `qm set --scsiN <volid>` consults for a
+    # stopped VM (no activation happens), so refusing here keeps a foreign volid
+    # out of VM configs altogether instead of failing later on resize/snapshot.
     # Strict: a vanished volume must not be reported as a 0-byte disk, which
     # would propagate a bogus size into the guest config.
-    my $vol     = _get_existing($scfg, "/api/v2/volumes/$uuid?projectName=$project",
-        "Volume $uuid", timeout => $timeout // 15);
+    my $vol     = _owned_existing_volume($scfg, $project, $uuid, 'use');
     my $size    = int($vol->{size} // 0);
     my $used    = int(($vol->{statistics} // {})->{logicalUsedStorage} // 0);
     return wantarray ? ($size, 'raw', $used, undef) : $size;
@@ -791,9 +991,44 @@ sub alloc_image {
     # Lightbits cluster (LightOS enforces unique volume names per project). The
     # same ownership data is also stored as queryable labels.
     my $guid     = _vm_guid($vmid);
-    my $index    = _next_disk_index($scfg, $vmid);
     my $owner_id = _owner_id($scfg);
-    my $vol_name = "vm-${vmid}-${guid}-disk-${index}";
+    my @labels   = (
+        { key => $LBL_VMID,    value => "$vmid" },
+        { key => $LBL_VMGENID, value => "$guid" },
+        { key => $LBL_NODE,    value => "$owner_id" },
+    );
+
+    # qemu-server names the one volume it must recognise again by name: the
+    # cloud-init drive, requested as $name = "vm-<vmid>-cloudinit" (see the
+    # "Cloud-init volumes" note above _cloudinit_vmid). Honour that name — the
+    # volid returned below is the one PVE stores and matches — and tag the
+    # volume's role so the UUID can be looked up from it later. Any other
+    # $name PVE passes is advisory and the UUID-based scheme is kept.
+    my ($vol_name, $volname);
+    if (defined(my $ci_vmid = defined $name ? _cloudinit_vmid($name) : undef)) {
+        die "cloud-init volume name '$name' does not belong to VM $vmid\n"
+            if $ci_vmid != $vmid;
+        # One per VM: a second one could not be told apart by name later, and
+        # PVE itself never asks for two. Fail here with the existing volume
+        # named rather than on a LightOS name clash or, worse, silently.
+        # Check-then-create is atomic against other allocations on this
+        # storage: PVE::Storage::vdisk_alloc (the only caller, `pvesm alloc`
+        # included) runs alloc_image inside cluster_lock_storage, a
+        # cluster-wide cfs lock per storeid for shared storage and a local
+        # file lock otherwise, so a concurrent allocation for the same VM
+        # waits here and then sees this one's volume.
+        if (my $existing = _find_cloudinit_volume($scfg, $project, $vmid)) {
+            die "VM $vmid already has a cloud-init volume on this Lightbits storage: "
+              . "$existing->{UUID} ('$existing->{name}'). Free it first "
+              . "(pvesm free $storeid:vm-$vmid-cloudinit).\n";
+        }
+        $vol_name = "vm-${vmid}-${guid}-cloudinit";
+        $volname  = "vm-${vmid}-cloudinit";
+        push @labels, { key => $LBL_ROLE, value => $ROLE_CLOUDINIT };
+    } else {
+        my $index = _next_disk_index($scfg, $vmid);
+        $vol_name = "vm-${vmid}-${guid}-disk-${index}";
+    }
     # int() so the value (a string when read back from storage.cfg) serialises
     # as a JSON number, matching the previous hardcoded literal.
     my $replica_count = int($scfg->{lb_replica_count} // 1);
@@ -804,11 +1039,7 @@ sub alloc_image {
         replicaCount => $replica_count,
         projectName  => $project,
         acl          => { values => [$host_nqn] },
-        labels       => [
-            { key => $LBL_VMID,    value => "$vmid" },
-            { key => $LBL_VMGENID, value => "$guid" },
-            { key => $LBL_NODE,    value => "$owner_id" },
-        ],
+        labels       => \@labels,
     };
 
     my $result = _api($scfg, 'POST', '/api/v2/volumes', $body);
@@ -863,15 +1094,35 @@ sub alloc_image {
     }
 
     # The volid embeds the vmid so PVE can identify the owning guest (the UUID
-    # remains the Lightbits volume's real identity, recovered via _vol_uuid).
-    return "vm-${vmid}-${uuid}";
+    # remains the Lightbits volume's real identity, recovered via _vol_uuid) —
+    # except for the cloud-init drive, which keeps the name PVE asked for.
+    return $volname // "vm-${vmid}-${uuid}";
 }
 
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase) = @_;
 
     my $project = _project($scfg);
-    my $uuid    = _vol_uuid($volname);
+    my $link    = _symlink_path($storeid, _link_name($volname));
+
+    # A cloud-init volume that is already gone resolves to no UUID at all;
+    # same idempotent outcome as the vanished-volume branch below.
+    my $uuid = _resolve_uuid($scfg, $volname);
+    unless (defined $uuid) {
+        unlink $link if -l $link;
+        return undef;
+    }
+
+    # Ownership guard: only volumes this storage created may be deleted from
+    # Proxmox. An operator can hand any volid to `pvesm free`; without this
+    # check that deleted a volume (and its snapshots) belonging to another
+    # consumer of the same LightOS project. A volume that is already gone is
+    # not an error (idempotent delete, as before).
+    my $vol = _owned_volume_or_die($scfg, $project, $uuid, 'delete');
+    unless (%$vol) {
+        unlink $link if -l $link;
+        return undef;
+    }
 
     # Delete the volume's snapshots first: a deleted volume's snapshots are not
     # removed with it, so leaving them behind would hold space and reserve names.
@@ -892,7 +1143,6 @@ sub free_image {
 
     _api($scfg, 'DELETE', "/api/v2/volumes/$uuid?projectName=$project");
 
-    my $link = _symlink_path($storeid, $uuid);
     unlink $link if -l $link;
 
     return undef;
@@ -909,7 +1159,7 @@ sub path {
     $snap //= $parsed_snap;
     die "Snapshots not supported by Lightbits plugin\n" if $snap;
     # Return the owning vmid so PVE frees this disk when its VM is destroyed.
-    return (_symlink_path($storeid, _vol_uuid($volname)), $vmid, 'images');
+    return (_symlink_path($storeid, _link_name($volname)), $vmid, 'images');
 }
 
 # ── Activate / deactivate ─────────────────────────────────────────────────────
@@ -945,16 +1195,19 @@ sub deactivate_storage {
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
-    # Extract + untaint the Lightbits UUID from the volume name for fs/API ops.
-    my $uuid       = _vol_uuid($volname);
+    # Resolve the Lightbits UUID (untainted) for the API calls; the symlink is
+    # keyed on the volname-derived link name (the UUID, or the cloud-init name).
+    my $uuid       = _resolve_existing_uuid($scfg, $volname);
     my $project    = _project($scfg);
     my $subsys_nqn = _subsys_nqn($scfg);
-    my $link       = _symlink_path($storeid, $uuid);
+    my $link       = _symlink_path($storeid, _link_name($volname));
 
     # Fetch volume metadata. This runs before the "already active" check below
     # because that check needs the nsid to tell a still-valid symlink from one
     # left over from a previous activation (see _symlink_is_current).
-    my $vol  = _api($scfg, 'GET', "/api/v2/volumes/$uuid?projectName=$project");
+    # Ownership guard first: activating a volume rewrites its ACL (below), so
+    # a foreign volume named by volid must be refused before anything is sent.
+    my $vol = _owned_existing_volume($scfg, $project, $uuid, 'activate');
     my $nsid = $vol->{nsid} or die "Cannot determine NSID for volume $uuid\n";
 
     # Grant this host access before waiting for its device: alloc_image only
@@ -983,9 +1236,23 @@ sub activate_volume {
     # added later, unlike a one-shot connect loop.
     _write_dsc_conf($storeid, $scfg, _host_nqn(), $subsys_nqn);
 
-    # Wait for a path to the subsystem to come up.
-    for my $attempt (1..30) {
+    # Wait for a path to the subsystem to come up. discovery-client is supposed
+    # to pick the (re)written config up via inotify, but after a full teardown
+    # — the plugin's own `nvme disconnect` on the last deactivation, i.e. the
+    # first VM start on a "cold" node — it reliably did not (validated 2026-10-04
+    # on LightOS 3.20.1: no reconnect for 9+ minutes, every retry failing after
+    # the 60 s wait, while `systemctl restart discovery-client` made the very
+    # next activation succeed). So if no connection shows up within
+    # $DSC_NUDGE_AFTER seconds, nudge the daemon once and keep waiting; the
+    # restart is harmless for running guests because the kernel owns the
+    # existing connections (survives even `kill -9` of discovery-client).
+    my $nudged = 0;
+    for my $attempt (1..$DSC_CONNECT_WAIT) {
         last if _is_connected($subsys_nqn);
+        if (!$nudged && $attempt >= $DSC_NUDGE_AFTER) {
+            _nudge_discovery_client($storeid, $subsys_nqn);
+            $nudged = 1;
+        }
         sleep 1;
     }
 
@@ -1003,7 +1270,15 @@ sub activate_volume {
         unless $dev;
 
     make_path("$SYMLINK_DIR/$storeid");
-    symlink($dev, $link) or die "Cannot create symlink $link -> $dev: $!\n";
+    # Two concurrent activations of the same volume (parallel full clones from
+    # one template, seen live 2026-10-04) race between the "already current"
+    # check above and this symlink(): the loser gets EEXIST although the link
+    # now points at the right namespace. Treat that as success.
+    unless (symlink($dev, $link)) {
+        my $err = $!;
+        return 1 if _symlink_is_current($link, $subsys_nqn, $nsid);
+        die "Cannot create symlink $link -> $dev: $err\n";
+    }
 
     return 1;
 }
@@ -1037,7 +1312,7 @@ sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
     my $subsys_nqn = _subsys_nqn($scfg);
-    my $link       = _symlink_path($storeid, _vol_uuid($volname));
+    my $link       = _symlink_path($storeid, _link_name($volname));
 
     unlink $link if -l $link;
 
@@ -1107,7 +1382,11 @@ sub volume_resize {
     my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
 
     my $project = _project($scfg);
-    my $uuid    = _vol_uuid($volname);
+    my $uuid    = _resolve_existing_uuid($scfg, $volname);
+
+    # Ownership guard before the PUT (a VM config may still reference a foreign
+    # volid from before the guard existed).
+    _owned_existing_volume($scfg, $project, $uuid, 'resize');
 
     # 4 KiB-align (Lightbits requires it), matching alloc_image.
     my $bytes = int(($size + 4095) / 4096) * 4096;
@@ -1146,7 +1425,7 @@ sub volume_resize {
     # (2) some kernel/target combinations don't emit/honor that event reliably.
     # `nvme ns-rescan` forces a synchronous re-read, so the new size is visible
     # before we return — cheap and idempotent.
-    _rescan_controller($storeid, $uuid);
+    _rescan_controller($storeid, _link_name($volname));
 
     return $bytes;
 }
@@ -1162,12 +1441,15 @@ sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
 
     my $project  = _project($scfg);
-    my $vol_uuid = _vol_uuid($volname);
+    my $vol_uuid = _resolve_existing_uuid($scfg, $volname);
 
     # PVE already validates snapshot names; assert defensively so an out-of-charset
     # name fails here rather than at the API.
     die "invalid snapshot name '$snap'\n"
         unless $snap =~ /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+    # Ownership guard: never snapshot a volume this storage did not create.
+    _owned_existing_volume($scfg, $project, $vol_uuid, 'snapshot');
 
     my $body = {
         name             => _lb_snap_name($vol_uuid, $snap),
@@ -1221,6 +1503,13 @@ sub volume_snapshot_delete {
 
     my $project = _project($scfg);
 
+    # Ownership guard: a foreign volume's snapshots are not ours to delete. A
+    # volume that is already gone falls through to the idempotent path below
+    # (a vanished cloud-init volume has no UUID left to look up: nothing to do).
+    my $vol_uuid = _resolve_uuid($scfg, $volname);
+    return undef unless defined $vol_uuid;
+    _owned_volume_or_die($scfg, $project, $vol_uuid, 'delete a snapshot of');
+
     # Idempotent on an already-removed snapshot: _snap_uuid dies with "not found"
     # when the snapshot is gone from the listing, which we treat as success (PVE
     # cleanup paths can fire delete more than once). A transient failure (API,
@@ -1247,7 +1536,7 @@ sub volume_rollback_is_possible {
     my ($class, $scfg, $storeid, $volname, $snap, $blockers) = @_;
 
     my $project   = _project($scfg);
-    my $vol_uuid  = _vol_uuid($volname);
+    my $vol_uuid  = _resolve_existing_uuid($scfg, $volname);
     my $snap_uuid = _snap_uuid($scfg, $project, $volname, $snap);
 
     my $vol   = _get_existing($scfg, "/api/v2/volumes/$vol_uuid?projectName=$project",
@@ -1278,7 +1567,11 @@ sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
 
     my $project   = _project($scfg);
-    my $vol_uuid  = _vol_uuid($volname);
+    my $vol_uuid  = _resolve_existing_uuid($scfg, $volname);
+
+    # Ownership guard before the rollback PUT.
+    _owned_existing_volume($scfg, $project, $vol_uuid, 'roll back');
+
     my $snap_uuid = _snap_uuid($scfg, $project, $volname, $snap);
 
     _api($scfg, 'PUT', "/api/v2/projects/$project/volumes/$vol_uuid/rollback",
@@ -1300,7 +1593,7 @@ sub volume_snapshot_rollback {
         . "(last state '$state')\n"
         if $state ne 'Available';
 
-    _rescan_controller($storeid, $vol_uuid);
+    _rescan_controller($storeid, _link_name($volname));
 
     return undef;
 }
@@ -1313,7 +1606,7 @@ sub volume_snapshot_info {
     my ($class, $scfg, $storeid, $volname) = @_;
 
     my $project  = _project($scfg);
-    my $vol_uuid = _vol_uuid($volname);
+    my $vol_uuid = _resolve_existing_uuid($scfg, $volname);
 
     my @snaps;
     for my $s (@{ _snapshots_for_volume($scfg, $project, $vol_uuid) }) {

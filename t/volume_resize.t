@@ -34,13 +34,13 @@ no warnings 'redefine';
         $reported = $body->{size};   # cluster now reports the new size
         return {};
     }
-    return { size => 0, state => 'Creating' } if $method eq 'GET' && $never;
-    return { size => $reported, state => 'Available' } if $method eq 'GET';
+    return { size => 0, state => 'Creating', labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'node-a' } ] } if $method eq 'GET' && $never;
+    return { size => $reported, state => 'Available', labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'node-a' } ] } if $method eq 'GET';
     return {};
 };
 use warnings 'redefine';
 
-my $scfg    = { lb_project => 'default' };
+my $scfg    = { lb_project => 'default', lb_owner_id => 'node-a' };
 my $volname = 'vm-100-feedface-0000-4000-8000-000000000abc';
 my $UUID    = 'feedface-0000-4000-8000-000000000abc';
 

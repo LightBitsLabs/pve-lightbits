@@ -85,11 +85,28 @@ You need to collect three values before installation:
 | **API endpoint(s)** | IP or hostname of one or more Lightbits nodes, port 443. Example: `192.168.10.10:443`. List every management node you want failover across as a comma-separated `lb_api_host` (e.g. `192.168.10.10:443,192.168.10.11:443`) — the plugin tries each one on a connection failure or 5xx, so the storage keeps working even if one node is down. Failover only advances to the next endpoint for these retryable failures: a 4xx is treated as a definitive answer (every endpoint fronts the same cluster state) and stops there, and mutating calls (create/update/delete) are only tried against one endpoint per call, since a 5xx from those can arrive after the request already took effect. |
 | **JWT token** | Found at `/etc/lbcli/lbcli.yml` on the cluster management node, or generated with `lbcli create jwt`. |
 | **NVMe-oF data endpoint(s)** | Same IP(s) as the API nodes, port 4420. Example: `192.168.10.10:4420`. List **every data node** on a multi-node cluster as a comma-separated `lb_nvme_host` — this seeds `discovery-client` (see below), which then discovers nodes added to the cluster later on its own. It does **not** proactively drop the connection to a node removed from this list (see the note below) — shrinking the list only fully takes effect once this storage's own connection is cleared, on its next full deactivation. |
-| **Project name** | Optional. Default is `default`. Use a specific project to isolate Proxmox volumes. |
+| **Project name** | Optional. Default is `default`. A dedicated project per Proxmox cluster is the cleanest setup, but sharing a project with other consumers is safe — see [Volumes the plugin does not own](#volumes-the-plugin-does-not-own). |
 
 The subsystem NQN is fetched automatically from the cluster API — you no longer need to look it up manually. If you prefer to pin it explicitly (e.g. for air-gapped environments where the API may be unreachable at connect time), you can still supply `--lb_subsys_nqn`.
 
 > **Note on discovery:** LightOS exposes a standard NVMe-oF Discovery Controller (port 8009), and this plugin uses Lightbits' official [`discovery-client`](https://github.com/LightBitsLabs/discovery-client) daemon to manage NVMe-oF connections rather than calling `nvme connect` itself. On volume activation, the plugin writes `lb_nvme_host`'s endpoints into a `discovery-client` config file (`/etc/discovery-client/discovery.d/lightbits-<storeid>.conf`); `discovery-client` then connects every data node and — unlike a static one-shot connect — keeps that current as cluster nodes are added later, with no config change needed on this host. It does **not** proactively remove connections for *removed* nodes on its own (they go stale) unless the cluster has `ctrlLossTMO` configured (LightOS 3.19.1+), so the plugin still runs an explicit `nvme disconnect` on the last deactivation of a subsystem.
+
+#### Volumes the plugin does not own
+
+The plugin labels every volume it creates with `pveVmid`, `pveVmgenid` and `pveNode` (the node hostname, or `lb_owner_id` if set — set it to the cluster name on a PVE cluster). **Ownership is decided by those labels alone.** A volume in the same LightOS project that does not carry a numeric `pveVmid` *and* a `pveNode` equal to this storage's owner id — one created with `lbcli`, by an application server, by another hypervisor or another PVE cluster — is
+
+- never listed by `pvesm list` or shown in the storage's *VM Disks* view (so it can never appear as an "unused disk" with a *Remove* button),
+- refused by `pvesm free` (the delete task fails with `refusing to delete Lightbits volume … not created by this Proxmox storage`), and
+- refused when attached to a VM by volid (`qm set … --scsiN <storage>:vm-0-<uuid>`), so its ACL is never modified.
+
+Manage such volumes with `lbcli`. Volume names are *not* consulted: an unlabelled volume called `vm-100-…` is still foreign. If a plugin-created volume lost its labels (for example because `lbcli update volume --labels` replaced them — LightOS replaces the whole label set on update), re-adopt it by restoring them:
+
+```bash
+lbcli update volume --project-name <project> --uuid <volume-uuid> \
+  --labels pveVmid=<vmid>,pveNode=<owner-id>      # owner-id = lb_owner_id, or the node hostname if unset
+```
+
+This also means a LightOS project can be shared between Proxmox and other workloads: the plugin cannot touch what it did not create. Validated end-to-end on a pre-populated 3-node LightOS 3.20.1 cluster (`t/e2e/foreign_volumes.sh`).
 
 #### Getting a JWT token
 
@@ -142,6 +159,8 @@ The installer:
 - Installs `nvme-cli` if not present
 - Installs and starts `discovery-client` if not present (best-effort — if the repo setup fails, e.g. no internet access, it warns and continues; install it manually before use in that case)
 - Restarts `pvedaemon` and `pvestatd`
+
+Run `./scripts/install.sh --help` for the full description, requirements, and exit codes. Re-running the installer is safe and is how you upgrade to a newer plugin version.
 
 ### 3. Add the storage
 
@@ -226,6 +245,10 @@ If any `lightbits` storage entries still exist in `/etc/pve/storage.cfg`, the
 script refuses to proceed and lists the `pvesm remove <storeid>` command for
 each one — remove them first (or pass `--force` to have the script do it for
 you) and re-run.
+
+Run `./scripts/uninstall.sh --help` for the full description, including what the
+uninstaller deliberately leaves in place (your Lightbits volumes and snapshots,
+the `nvme-cli`/`discovery-client` packages, and any live NVMe-oF connections).
 
 The uninstaller then removes, in order:
 - Every `discovery-client` config file this plugin wrote
@@ -418,6 +441,9 @@ cat /etc/nvme/hostnqn   # should print a nqn.* string
 
 ### `Block device for volume <uuid> (nsid=N) did not appear`
 
+**Cold node (first VM start after the last Lightbits volume on this node was deactivated):** the plugin disconnects the subsystem on the last deactivation and discovery-client did not reliably act on the re-created config file afterwards. Since the version carrying this note, `activate_volume` restarts discovery-client itself when no connection appears within 10 s and logs `discovery-client has not connected … restarting discovery-client` in the task; a start that still fails after that points at a real connectivity or ACL problem. Keeping one always-on VM with a Lightbits disk per node (a "keeper") is no longer required to avoid this, but still avoids the ~10 s restart delay on the first start.
+
+
 The NVMe-oF connect never happened or the block device didn't show up. Check:
 
 ```bash
@@ -487,12 +513,13 @@ pvesm config lb-storage | grep lb_api_host
    - POSTs to `/api/v2/volumes` with the volume name (`vm-<vmid>-<vmgenid>-disk-<n>`), size (bytes, 4096-aligned), replica count, project, and the host NQN in the ACL so only this host can access it.
    - Polls until the volume reaches `Available` state.
    - Returns the volid `lb-storage:vm-<vmid>-<uuid>` (the embedded vmid lets Proxmox identify the owning guest), which is stored in the VM config.
+   - **Cloud-init drive:** qemu-server recognises a VM's cloud-init drive only by the volume name `vm-<vmid>-cloudinit` and asks the storage for exactly that name, so for this one volume the plugin honours it: the volid is `lb-storage:vm-<vmid>-cloudinit`, the LightOS volume is named `vm-<vmid>-<vmgenid>-cloudinit` and carries an extra `pveRole=cloudinit` label, through which the plugin finds its UUID again (a VM has at most one). Proxmox writes the generated cloud-init ISO straight into the Lightbits volume, so `qm clone --full --storage lb-storage`, `qmrestore --storage lb-storage` and HA failover all work with the cloud-init drive on Lightbits.
 
 2. **`activate_volume`** - Called when a VM starts.
    - GETs the volume to retrieve its NVMe namespace ID (NSID).
    - Writes (or rewrites) `/etc/discovery-client/discovery.d/lightbits-<storeid>.conf` (one `-t tcp -a <host> -s 8009 -q <hostnqn> -n <subsys_nqn>` line per `lb_nvme_host` entry) whenever this volume isn't already active on this host — not only when no connection exists yet — `discovery-client` (not the plugin) then performs the actual `nvme connect` against every data node.
    - Scans `/sys/block/` to find the block device with matching NSID (the kernel names namespaces sequentially regardless of the NSID value).
-   - Creates a stable symlink at `/dev/lightbits/<storeid>/<uuid>` → `/dev/nvmeXnY`.
+   - Creates a stable symlink at `/dev/lightbits/<storeid>/<uuid>` → `/dev/nvmeXnY` (`/dev/lightbits/<storeid>/vm-<vmid>-cloudinit` for a cloud-init drive).
 
 3. **`deactivate_volume`** - Called when a VM stops.
    - Removes the symlink.
