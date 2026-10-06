@@ -206,6 +206,45 @@ pvesm add lightbits lb-storage \
 
 To create volumes with more than one replica (on a multi-node cluster), add `--lb_replica_count 2` (or `3`). It defaults to `1`, and the value must be supported by the cluster — a single-node cluster only accepts `1`.
 
+#### TLS verification for the API connection
+
+The plugin talks to the LightOS cluster API over HTTPS. Certificate verification is **off by default**, because a LightOS cluster serves its API with a certificate issued by its own per-cluster CA, and enabling verification unconditionally would break existing storage entries.
+
+Turn it on. Every API request carries the `lb_jwt` bearer token in an `Authorization` header, and with verification off an on-path attacker can present any certificate, terminate the connection, and capture a token that grants full control of the project's volumes.
+
+**Recommended for a LightOS cluster: pin the certificate's fingerprint.** The cluster's API certificate is issued to the name `api.service` (no subject alternative names) by the cluster's internal CA, which the cluster does not hand out, so CA-based verification of an endpoint addressed by IP cannot succeed. Every node of a cluster presents the same certificate, so one fingerprint covers every `lb_api_host` entry. Read it from any API endpoint and pin it, the same way Proxmox's own Proxmox Backup Server storage does:
+
+```bash
+echo | openssl s_client -connect 10.10.10.1:443 2>/dev/null | openssl x509 -fingerprint -sha256 -noout
+# SHA256 Fingerprint=DD:89:8D:65:...:FA:F9
+pvesm set lb-storage --lb_fingerprint DD:89:8D:65:...:FA:F9
+```
+
+From then on a connection to any endpoint whose certificate does not match fails with `certificate verify failed` and the storage shows as inactive, with the error in `pvesm status` and the task log.
+
+**Certificate rotation.** A pin identifies one exact certificate, so when the cluster's certificate is replaced (a certificate rotation, or a cluster re-install) the pin must follow. `lb_fingerprint` accepts a comma-separated list for exactly this: before the rotation, add the new certificate's fingerprint next to the current one; after the rotation, remove the old one. Do this on every Proxmox cluster that uses the storage.
+
+```bash
+pvesm set lb-storage --lb_fingerprint "<current>,<new>"     # before the rotation
+pvesm set lb-storage --lb_fingerprint "<new>"               # after it
+```
+
+What a mismatched pin affects: only the control plane. The NVMe/TCP data path carries no TLS, so running guests keep their I/O whatever happens to the API certificate. Everything that needs the API stops until the pin is corrected: the storage shows inactive, no new volumes, snapshots or resizes, and no VM starts or HA restarts on that storage (activation reads the volume's namespace and ACL from the API). Treat the pin update as part of the rotation runbook, not as an afterthought.
+
+**Alternatively, verify against a CA.** For a cluster fronted by a properly issued certificate (a load balancer or proxy), or addressed by a hostname that matches its certificate, enable regular peer and hostname verification against the host's trust store:
+
+```bash
+pvesm set lb-storage --lb_ssl_verify 1
+```
+
+If the signing CA is not in the Proxmox host's system trust store, point the plugin at it:
+
+```bash
+pvesm set lb-storage --lb_ssl_verify 1 --lb_ca_file /etc/pve/lightbits-ca.pem
+```
+
+`lb_ca_file` is only consulted when verification is enabled, and an unreadable path fails the API call loudly rather than silently falling back to an unverified connection. `lb_fingerprint` and `lb_ssl_verify` can be combined: a matching fingerprint is accepted outright, anything else must pass the CA and hostname check.
+
 The subsystem NQN is fetched automatically from the cluster. To override it explicitly (same "list every node" rule applies to `lb_api_host`/`lb_nvme_host` here too):
 
 ```bash
@@ -545,7 +584,7 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 ## Limitations
 
 - **No live migration**: VM live migration requires shared storage visibility on both source and destination hosts. Multi-node deployment with a shared Lightbits cluster works structurally, but the per-host ACL in `alloc_image` currently restricts volume access to the allocating host's NQN. This needs to be addressed for migration support.
-- **Self-signed TLS**: SSL hostname verification is disabled to accommodate Lightbits clusters with self-signed certificates.
+- **TLS verification off by default**: the API connection does not verify the cluster's certificate unless `lb_fingerprint` or `lb_ssl_verify` is set (see "TLS verification for the API connection"), because a LightOS cluster presents a certificate from its own cluster CA. Pinning the fingerprint is a one-line change per storage.
 - **Internet access required during install**: `scripts/install.sh` fetches `discovery-client` from Lightbits' hosted package repository. Air-gapped/offline environments aren't supported yet — see the Roadmap below.
 
 ---

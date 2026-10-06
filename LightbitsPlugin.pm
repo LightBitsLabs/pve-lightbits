@@ -31,6 +31,67 @@ sub _api_endpoints {
     return @eps;
 }
 
+# TLS options for the API client.
+#
+# Verification is OFF unless lb_fingerprint or lb_ssl_verify is set, because a
+# LightOS cluster serves its API with a certificate issued by its own
+# per-cluster CA and turning verification on by default would break every
+# existing storage entry. Turn it on where you can: every request carries the
+# lb_jwt bearer token in an Authorization header, so without verification an
+# on-path attacker can present any certificate, terminate the connection, and
+# harvest a token that grants full control of the project's volumes.
+#
+# Two ways to verify:
+#   - lb_fingerprint: pin the SHA-256 fingerprint of the API certificate, the
+#     same mechanism Proxmox's own PBS storage uses for self-signed servers.
+#     This is the one that works against a LightOS cluster as shipped: its
+#     API certificate is issued to the name "api.service" with no SAN by the
+#     cluster's internal CA, which the cluster does not hand out, so CA-based
+#     verification of an endpoint addressed by IP cannot succeed. Every node
+#     of a cluster presents the same certificate (verified live on a 3-node
+#     LightOS 3.20.1 cluster across all six API endpoints), so one fingerprint
+#     covers every lb_api_host entry. A matching fingerprint is accepted
+#     regardless of CA chain and hostname; a mismatch falls through to the
+#     chain check and fails. Several fingerprints may be listed, which is how
+#     a certificate rotation stays seamless: add the new one before the
+#     rotation, drop the old one after. Only the control plane depends on
+#     this — the NVMe/TCP data path carries no TLS and running guests keep
+#     their I/O whatever happens to the API certificate — but VM starts and
+#     HA restarts need the API, so a stale pin would block them.
+#   - lb_ssl_verify: peer and hostname verification against the host's trust
+#     store, or lb_ca_file. For clusters fronted by a properly issued
+#     certificate (a load balancer or proxy), or a LightOS cluster addressed
+#     by a hostname that matches its certificate.
+sub _ssl_opts {
+    my ($scfg) = @_;
+
+    my @fps = grep { length } map { s/^\s+|\s+$//gr } split /,/, ($scfg->{lb_fingerprint} // '');
+
+    return { verify_hostname => 0, SSL_verify_mode => 0 }
+        unless @fps || $scfg->{lb_ssl_verify};
+
+    # SSL_verify_mode 1 is IO::Socket::SSL's SSL_VERIFY_PEER.
+    my %opts = (verify_hostname => 1, SSL_verify_mode => 1);
+    if (@fps) {
+        # IO::Socket::SSL wants "sha256$<hex>" (one, or a list of them); the
+        # operator-facing form is openssl's colon-separated hex, as in PBS.
+        my @pins;
+        for my $fp (@fps) {
+            (my $hex = lc $fp) =~ s/://g;
+            die "lb_fingerprint '$fp' is not a SHA-256 fingerprint (64 hex digits)\n"
+                unless $hex =~ /^[0-9a-f]{64}$/;
+            push @pins, "sha256\$$hex";
+        }
+        $opts{SSL_fingerprint} = @pins == 1 ? $pins[0] : \@pins;
+    }
+    if (defined $scfg->{lb_ca_file} && length $scfg->{lb_ca_file}) {
+        my $ca = $scfg->{lb_ca_file};
+        die "lb_ca_file '$ca' is not a readable file\n" unless -r $ca;
+        $opts{SSL_ca_file} = $ca;
+    }
+    return \%opts;
+}
+
 # lb_api_host may list several cluster management nodes for failover (mirrors
 # Lightbits' own Cinder driver's lightos_api_address ListOpt + round-robin).
 # Each call picks its own random start index — there's no long-lived process
@@ -50,7 +111,7 @@ sub _api {
     die "lb_api_host is not configured\n" unless @endpoints;
 
     my $ua = LWP::UserAgent->new(
-        ssl_opts => { verify_hostname => 0, SSL_verify_mode => 0 },
+        ssl_opts => _ssl_opts($scfg),
         timeout  => $opts{timeout} // 15,
     );
 
@@ -627,6 +688,38 @@ sub properties {
             maximum     => 3,
             default     => 1,
         },
+        lb_fingerprint => {
+            description => "SHA-256 fingerprint of the Lightbits API server's TLS "
+                . "certificate, colon-separated hex as printed by "
+                . "'openssl s_client -connect <host>:443 </dev/null 2>/dev/null | "
+                . "openssl x509 -fingerprint -sha256 -noout'. Pins the certificate: the "
+                . "connection is verified against this fingerprint instead of a CA, "
+                . "which is the way to verify a LightOS cluster's own certificate (issued "
+                . "by the cluster's internal CA to the name api.service, identical on "
+                . "every node). Recommended wherever lb_ssl_verify cannot be used. A "
+                . "comma-separated list is accepted so a certificate rotation can be "
+                . "staged: add the new fingerprint before, remove the old one after.",
+            type        => 'string',
+            pattern     => '([A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}(,([A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2})*',
+        },
+        lb_ssl_verify => {
+            description => "Verify the Lightbits API server's TLS certificate against "
+                . "the host's trust store (or lb_ca_file), including the hostname. Off by "
+                . "default, because a LightOS cluster serves its API with a certificate "
+                . "from its own cluster CA; for such clusters use lb_fingerprint instead. "
+                . "Enable verification wherever you can: every API request carries the "
+                . "lb_jwt bearer token, so without it an on-path attacker can present any "
+                . "certificate and capture a token that grants full control of the "
+                . "project's volumes.",
+            type        => 'boolean',
+            default     => 0,
+        },
+        lb_ca_file => {
+            description => "Path to a PEM CA bundle used to verify the Lightbits API "
+                . "server's certificate when lb_ssl_verify is enabled. Defaults to the "
+                . "host's system trust store.",
+            type        => 'string',
+        },
     };
 }
 
@@ -639,6 +732,9 @@ sub options {
         lb_subsys_nqn => { fixed => 1, optional => 1 },
         lb_owner_id   => { optional => 1 },
         lb_replica_count => { optional => 1 },
+        lb_fingerprint => { optional => 1 },
+        lb_ssl_verify => { optional => 1 },
+        lb_ca_file    => { optional => 1 },
         content       => { optional => 1 },
         shared        => { optional => 1 },
         disable       => { optional => 1 },
