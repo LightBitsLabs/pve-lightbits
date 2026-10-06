@@ -563,7 +563,7 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 ## Limitations
 
 - **No live migration**: VM live migration requires shared storage visibility on both source and destination hosts. Multi-node deployment with a shared Lightbits cluster works structurally, but the per-host ACL in `alloc_image` currently restricts volume access to the allocating host's NQN. This needs to be addressed for migration support.
-- **Self-signed TLS**: SSL hostname verification is disabled to accommodate Lightbits clusters with self-signed certificates.
+- **TLS verification off by default**: the API connection does not verify the cluster's certificate unless `lb_ssl_verify` is enabled (see "TLS verification for the API connection"), because a LightOS cluster usually presents a certificate from its own cluster CA.
 - **Internet access required during install**: `scripts/install.sh` fetches `discovery-client` from Lightbits' hosted package repository. Air-gapped/offline environments aren't supported yet — see the Roadmap below.
 
 ---
