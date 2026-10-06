@@ -90,6 +90,11 @@ like( $class->properties()->{lb_fingerprint}{pattern}, qr/\(,/,
 is_deeply( ssl_opts({ lb_fingerprint => '' }), { verify_hostname => 0, SSL_verify_mode => 0 },
     'an empty lb_fingerprint (cleared via pvesm set) leaves verification off' );
 {
+    my $err = eval { ssl_opts({ lb_fingerprint => ' , ' }); 1 };
+    ok( !$err, 'lb_fingerprint set to only whitespace/commas dies instead of falling back to unverified' );
+    like( $@, qr/lb_fingerprint is set but contains no/, 'the error names lb_fingerprint' );
+}
+{
     my $err = eval { ssl_opts({ lb_fingerprint => "$FP_COLONS,DD:89:8D" }); 1 };
     ok( !$err, 'a malformed fingerprint in the list dies rather than silently connecting unverified' );
     like( $@, qr/lb_fingerprint .*SHA-256/, 'the error names lb_fingerprint' );

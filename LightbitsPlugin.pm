@@ -65,7 +65,13 @@ sub _api_endpoints {
 sub _ssl_opts {
     my ($scfg) = @_;
 
-    my @fps = grep { length } map { s/^\s+|\s+$//gr } split /,/, ($scfg->{lb_fingerprint} // '');
+    my $fp_raw = $scfg->{lb_fingerprint} // '';
+    my @fps = grep { length } map { s/^\s+|\s+$//gr } split /,/, $fp_raw;
+    # A value that is set but yields no pins (only whitespace or commas, which
+    # the schema pattern stops at pvesm but a hand-edited storage.cfg does not)
+    # must not quietly leave the connection unverified.
+    die "lb_fingerprint is set but contains no SHA-256 fingerprint\n"
+        if $fp_raw =~ /\S/ && !@fps;
 
     return { verify_hostname => 0, SSL_verify_mode => 0 }
         unless @fps || $scfg->{lb_ssl_verify};
