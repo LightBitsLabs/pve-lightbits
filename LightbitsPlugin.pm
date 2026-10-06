@@ -973,6 +973,12 @@ sub alloc_image {
         # One per VM: a second one could not be told apart by name later, and
         # PVE itself never asks for two. Fail here with the existing volume
         # named rather than on a LightOS name clash or, worse, silently.
+        # Check-then-create is atomic against other allocations on this
+        # storage: PVE::Storage::vdisk_alloc (the only caller, `pvesm alloc`
+        # included) runs alloc_image inside cluster_lock_storage, a
+        # cluster-wide cfs lock per storeid for shared storage and a local
+        # file lock otherwise, so a concurrent allocation for the same VM
+        # waits here and then sees this one's volume.
         if (my $existing = _find_cloudinit_volume($scfg, $project, $vmid)) {
             die "VM $vmid already has a cloud-init volume on this Lightbits storage: "
               . "$existing->{UUID} ('$existing->{name}'). Free it first "

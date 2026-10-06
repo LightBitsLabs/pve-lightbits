@@ -21,7 +21,10 @@
 #      cluster-side (API) as well as in the storage listing.
 #
 # API host and JWT are read from the storage's definition in
-# /etc/pve/storage.cfg for the cluster-side leak check. Needs curl, python3
+# /etc/pve/storage.cfg for the cluster-side leak check. The check talks to
+# the same API endpoints the plugin uses; set LB_CACERT=<pem> to verify the
+# cluster's certificate, otherwise verification is skipped as the plugin
+# itself does today (self-signed LightOS certificates). Needs curl, python3
 # and isoinfo (genisoimage), all present on a stock PVE node.
 #
 # Usage:
@@ -38,7 +41,7 @@ RESTORE_VMID="${RESTORE_VMID:-$((VMID + 2))}"
 BACKUP_STORAGE="${BACKUP_STORAGE:-local}"
 DISK_GB="${DISK_GB:-1}"
 TEST_VM_NAME="lb-cloudinit-e2e"   # ownership marker: we only ever destroy VMs with this name
-BACKUP_FILE=""
+BACKUP_VOLID=""   # backup volume created by this run, freed at the end
 
 pass=0; fail=0
 ok()   { echo "PASS: $1"; pass=$((pass+1)); }
@@ -68,10 +71,11 @@ API_HOSTS="$(scfg_val "$STORAGE" lb_api_host)"
 JWT="$(scfg_val "$STORAGE" lb_jwt)"
 PROJECT="$(scfg_val "$STORAGE" lb_project)"; PROJECT="${PROJECT:-default}"
 if [ -z "$API_HOSTS" ] || [ -z "$JWT" ]; then echo "ABORT: storage '$STORAGE' not in /etc/pve/storage.cfg" >&2; exit 1; fi
+CURL_TLS=(-k); [ -n "${LB_CACERT:-}" ] && CURL_TLS=(--cacert "$LB_CACERT")
 api_get() {
     local p="$1" out code h
     for h in ${API_HOSTS//,/ }; do
-        out="$(curl -sk -m 20 -H "Authorization: Bearer $JWT" -w $'\n%{http_code}' "https://$h$p" 2>/dev/null)" || continue
+        out="$(curl -s "${CURL_TLS[@]}" -m 20 -H "Authorization: Bearer $JWT" -w $'\n%{http_code}' "https://$h$p" 2>/dev/null)" || continue
         code="${out##*$'\n'}"; out="${out%$'\n'*}"
         [ "$code" = 200 ] && { printf '%s' "$out"; return 0; }
     done
@@ -88,15 +92,13 @@ for v in json.load(sys.stdin).get("volumes", []):
         print(v["UUID"], v.get("name", ""), labels.get("pveRole", "-"))' "$1"
 }
 
-# Newest vzdump archive of $1 in the backup storage's dump dir (empty if none).
-backup_of() {
-    local dir
-    dir="$(pvesm path "${BACKUP_STORAGE}:backup" 2>/dev/null || echo /var/lib/vz/dump)"
-    find "$dir" -maxdepth 1 -name "vzdump-qemu-$1-*.vma.zst" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-
-}
+# Backup volids of VM $1 on $BACKUP_STORAGE, one per line (PVE's own listing,
+# whatever directory the storage uses). The archive this run creates is the
+# one present after vzdump that was not present before.
+backups_of() { pvesm list "$BACKUP_STORAGE" --content backup --vmid "$1" 2>/dev/null | awk 'NR>1{print $1}' | sort; }
 rm_backup() {
-    [ -n "$BACKUP_FILE" ] || return 0
-    rm -f "$BACKUP_FILE" "$BACKUP_FILE.notes" "${BACKUP_FILE%.vma.zst}.log" 2>/dev/null || true
+    [ -n "$BACKUP_VOLID" ] || return 0
+    pvesm free "$BACKUP_VOLID" >/dev/null 2>&1 || true   # removes archive, .log and .notes
 }
 
 # ── VM ownership guards + cleanup ─────────────────────────────────────────────
@@ -159,8 +161,9 @@ LIST="$(pvesm list "$STORAGE" --vmid "$VMID")"
 N_CI="$(grep -c "vm-${VMID}-cloudinit" <<<"$LIST" || true)"
 N_ALL="$(grep -c "^${STORAGE}:" <<<"$LIST" || true)"
 if [ "$N_CI" = 1 ] && [ "$N_ALL" = 2 ]; then ok "pvesm list: scsi0 + vm-${VMID}-cloudinit, nothing else"; else bad "pvesm list for $VMID: $LIST"; fi
-qm rescan --vmid "$VMID" >/dev/null 2>&1 || true
-if qm config "$VMID" | grep -q '^unused'; then bad "qm rescan added an unused disk: $(qm config "$VMID" | grep '^unused')"; else ok "qm rescan adds no unused duplicate of the cloud-init drive"; fi
+if ! qm rescan --vmid "$VMID" >/dev/null 2>&1; then bad "qm rescan --vmid $VMID failed"
+elif qm config "$VMID" | grep -q '^unused'; then bad "qm rescan added an unused disk: $(qm config "$VMID" | grep '^unused')"
+else ok "qm rescan adds no unused duplicate of the cloud-init drive"; fi
 CL="$(cluster_vols_of "$VMID")"
 if [ "$(wc -l <<<"$CL")" = 2 ] && grep -q ' cloudinit$' <<<"$CL" && grep -q -- "-${VMID}-.*-cloudinit cloudinit" <<<"$CL"; then ok "cluster-side: two volumes for $VMID, the cloud-init one labelled pveRole=cloudinit"; else bad "cluster-side volumes for $VMID: $CL"; fi
 
@@ -185,16 +188,23 @@ if [ -L "/dev/lightbits/$STORAGE/vm-${CLONE_VMID}-cloudinit" ]; then bad "clone:
 
 echo "== 5. backup + restore onto $STORAGE =="
 if pvesm status --content backup 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$BACKUP_STORAGE"; then
+    BEFORE="$(backups_of "$VMID")"
     vzdump "$VMID" --storage "$BACKUP_STORAGE" --mode stop --compress zstd --quiet 1 >/dev/null
-    BACKUP_FILE="$(backup_of "$VMID")"
-    if [ -n "$BACKUP_FILE" ]; then
-        qmrestore "$BACKUP_FILE" "$RESTORE_VMID" --storage "$STORAGE" >/dev/null 2>&1
+    BACKUP_VOLID="$(comm -13 <(echo "$BEFORE") <(backups_of "$VMID") | head -1)"
+    if [ -n "$BACKUP_VOLID" ]; then
+        echo "   backup: $BACKUP_VOLID"
+        qmrestore "$(pvesm path "$BACKUP_VOLID")" "$RESTORE_VMID" --storage "$STORAGE" >/dev/null 2>&1
         RCI="$(ci_volid "$RESTORE_VMID")"
         echo "   restored ide2: $RCI"
         if [ "$RCI" = "${STORAGE}:vm-${RESTORE_VMID}-cloudinit" ]; then ok "restore: cloud-init drive on $STORAGE under PVE's name"; else bad "restore cloud-init volid is '$RCI'"; fi
         if qm cloudinit dump "$RESTORE_VMID" user 2>/dev/null | grep -q 'e2e-second'; then ok "restore: PVE recognises its cloud-init drive"; else bad "restore: qm cloudinit dump fails"; fi
+        # The restored volume itself must take the regenerated ISO, as the clone's did.
+        qm cloudinit update "$RESTORE_VMID" >/dev/null
+        RDEV="$(activate "$RCI")"
+        if iso_userdata "$RDEV" | grep -q 'e2e-second'; then ok "restore: ISO regenerated into the restored Lightbits volume"; else bad "restore: no user-data on the restored cloud-init volume"; fi
+        deactivate "$RCI"
     else
-        bad "vzdump produced no backup file"
+        bad "vzdump produced no new backup of $VMID on $BACKUP_STORAGE"
     fi
 else
     echo "SKIP: storage '$BACKUP_STORAGE' has no backup content; restore path not tested"
