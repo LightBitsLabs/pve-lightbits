@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-10-06 - Tech Preview
+
+Tech Preview release. A VM's cloud-init drive can now live on Lightbits storage, so `qm clone --full --storage <lb>` and `qmrestore --storage <lb>` of cloud-init VMs work and HA no longer depends on a cloud-init image on `local`; TLS verification of the API connection is available through certificate pinning (`lb_fingerprint`, the mode that works against a LightOS cluster) or a CA (`lb_ssl_verify` / `lb_ca_file`); `get_identity` is stable across spellings of the same endpoint list; and the install scripts have `--help`. Validated live on a 2-node Proxmox VE 9.2.21 cluster against a 3-node LightOS 3.20.1 cluster (cloud-init create/update/clone/restore/purge, offline migration of a cloud-init VM between nodes, TLS pin/mismatch/rotation staging, identity, plus the six earlier live suites). **TLS verification stays off by default in this release**, a deliberate decision: enabling it unconditionally would break every existing storage entry, and a LightOS cluster's own certificate can only be verified by pinning. Pin it (`pvesm set <storeid> --lb_fingerprint <sha256>`); the README documents the procedure and certificate rotation. Still ahead of production readiness.
+
 ### Added
 
 - `scripts/install.sh` and `scripts/uninstall.sh` accept `-h` / `--help` and print full usage: what the script does step by step, its options, requirements, exit codes, and — for the uninstaller — what it deliberately leaves in place (your Lightbits volumes and snapshots, the `nvme-cli`/`discovery-client` packages, and live NVMe-oF connections). Arguments are parsed before the root check, so `--help` works as an unprivileged user.
