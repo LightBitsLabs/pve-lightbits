@@ -507,12 +507,13 @@ pvesm config lb-storage | grep lb_api_host
    - POSTs to `/api/v2/volumes` with the volume name (`vm-<vmid>-<vmgenid>-disk-<n>`), size (bytes, 4096-aligned), replica count, project, and the host NQN in the ACL so only this host can access it.
    - Polls until the volume reaches `Available` state.
    - Returns the volid `lb-storage:vm-<vmid>-<uuid>` (the embedded vmid lets Proxmox identify the owning guest), which is stored in the VM config.
+   - **Cloud-init drive:** qemu-server recognises a VM's cloud-init drive only by the volume name `vm-<vmid>-cloudinit` and asks the storage for exactly that name, so for this one volume the plugin honours it: the volid is `lb-storage:vm-<vmid>-cloudinit`, the LightOS volume is named `vm-<vmid>-<vmgenid>-cloudinit` and carries an extra `pveRole=cloudinit` label, through which the plugin finds its UUID again (a VM has at most one). Proxmox writes the generated cloud-init ISO straight into the Lightbits volume, so `qm clone --full --storage lb-storage`, `qmrestore --storage lb-storage` and HA failover all work with the cloud-init drive on Lightbits.
 
 2. **`activate_volume`** - Called when a VM starts.
    - GETs the volume to retrieve its NVMe namespace ID (NSID).
    - Writes (or rewrites) `/etc/discovery-client/discovery.d/lightbits-<storeid>.conf` (one `-t tcp -a <host> -s 8009 -q <hostnqn> -n <subsys_nqn>` line per `lb_nvme_host` entry) whenever this volume isn't already active on this host — not only when no connection exists yet — `discovery-client` (not the plugin) then performs the actual `nvme connect` against every data node.
    - Scans `/sys/block/` to find the block device with matching NSID (the kernel names namespaces sequentially regardless of the NSID value).
-   - Creates a stable symlink at `/dev/lightbits/<storeid>/<uuid>` → `/dev/nvmeXnY`.
+   - Creates a stable symlink at `/dev/lightbits/<storeid>/<uuid>` → `/dev/nvmeXnY` (`/dev/lightbits/<storeid>/vm-<vmid>-cloudinit` for a cloud-init drive).
 
 3. **`deactivate_volume`** - Called when a VM stops.
    - Removes the symlink.

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A VM's cloud-init drive can now live on Lightbits storage** ([#41](https://github.com/LightBitsLabs/pve-lightbits/issues/41)). qemu-server recognises a cloud-init drive purely by its volume name, `vm-<vmid>-cloudinit`, and asks the storage to allocate exactly that name; `alloc_image` ignored the request and returned the usual `vm-<vmid>-<uuid>`, so Proxmox never treated the volume as cloud-init: no ISO was written into it, the guest booted without user-data, `qm cloudinit update` did nothing, and `qm destroy --purge` left the 4 MiB volume behind (one leaked volume per `qm clone --full --storage <lb>` or `qmrestore --storage <lb>` of a cloud-init VM, reproduced live 2026-10-04). Keeping the drive on `local` instead broke HA failback after a node loss until the stale local image was removed by hand. `alloc_image` now honours the cloud-init name, labels the volume `pveRole=cloudinit` and names it `vm-<vmid>-<vmgenid>-cloudinit` on LightOS; `parse_volname`, `path`, `list_images` and every method that takes a volname resolve such a volume through its labels, its device symlink is keyed on the volname, a second cloud-init volume for the same VM is refused with the existing one named, and a cloud-init volume that no longer exists is idempotent for `free_image` and snapshot deletion. Regular disks are unchanged.
+
+### Added
+
+- `t/cloudinit_volume.t` (unit) and `t/e2e/cloudinit.sh` (live, on a real node): create with `--ide2 <lb>:cloudinit`, ISO read back from the Lightbits device, `qm cloudinit update` regenerating it in place, single listing entry with no `unused` duplicate after `qm rescan`, `qm clone --full --storage <lb>` and `vzdump` + `qmrestore --storage <lb>` giving recognised cloud-init drives, start/stop activating and deactivating the volume, and `qm destroy --purge` leaving nothing on the cluster.
+
 ## [0.9.5] - 2026-10-05 - Tech Preview
 
 Tech Preview release. Three control-plane fixes found by a two-day reliability validation on a 2-node Proxmox VE 9.2.21 cluster against a 3-node LightOS 3.20.1 cluster (live migration, HA fencing, node power-cut, data-leg partition, LightOS node stop and rolling restart, 5 h of lifecycle churn): a node whose last Lightbits volume was deactivated can start its next VM again without operator help, parallel full clones from one template no longer race on the shared source volume, and mutating REST calls fail over to another `lb_api_host` endpoint when a LightOS API node is down. The data path recorded zero `fio --verify` errors through every fault, before and after the fixes. Still ahead of production readiness.
