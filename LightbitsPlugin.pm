@@ -52,7 +52,12 @@ sub _api_endpoints {
 #     LightOS 3.20.1 cluster across all six API endpoints), so one fingerprint
 #     covers every lb_api_host entry. A matching fingerprint is accepted
 #     regardless of CA chain and hostname; a mismatch falls through to the
-#     chain check and fails.
+#     chain check and fails. Several fingerprints may be listed, which is how
+#     a certificate rotation stays seamless: add the new one before the
+#     rotation, drop the old one after. Only the control plane depends on
+#     this — the NVMe/TCP data path carries no TLS and running guests keep
+#     their I/O whatever happens to the API certificate — but VM starts and
+#     HA restarts need the API, so a stale pin would block them.
 #   - lb_ssl_verify: peer and hostname verification against the host's trust
 #     store, or lb_ca_file. For clusters fronted by a properly issued
 #     certificate (a load balancer or proxy), or a LightOS cluster addressed
@@ -60,21 +65,24 @@ sub _api_endpoints {
 sub _ssl_opts {
     my ($scfg) = @_;
 
-    my $fp = $scfg->{lb_fingerprint};
-    $fp = undef unless defined $fp && length $fp;
+    my @fps = grep { length } map { s/^\s+|\s+$//gr } split /,/, ($scfg->{lb_fingerprint} // '');
 
     return { verify_hostname => 0, SSL_verify_mode => 0 }
-        unless $fp || $scfg->{lb_ssl_verify};
+        unless @fps || $scfg->{lb_ssl_verify};
 
     # SSL_verify_mode 1 is IO::Socket::SSL's SSL_VERIFY_PEER.
     my %opts = (verify_hostname => 1, SSL_verify_mode => 1);
-    if ($fp) {
-        # IO::Socket::SSL wants "sha256$<hex>"; the operator-facing form is
-        # openssl's colon-separated uppercase hex, as in PBS.
-        (my $hex = lc $fp) =~ s/://g;
-        die "lb_fingerprint '$fp' is not a SHA-256 fingerprint (64 hex digits)\n"
-            unless $hex =~ /^[0-9a-f]{64}$/;
-        $opts{SSL_fingerprint} = "sha256\$$hex";
+    if (@fps) {
+        # IO::Socket::SSL wants "sha256$<hex>" (one, or a list of them); the
+        # operator-facing form is openssl's colon-separated hex, as in PBS.
+        my @pins;
+        for my $fp (@fps) {
+            (my $hex = lc $fp) =~ s/://g;
+            die "lb_fingerprint '$fp' is not a SHA-256 fingerprint (64 hex digits)\n"
+                unless $hex =~ /^[0-9a-f]{64}$/;
+            push @pins, "sha256\$$hex";
+        }
+        $opts{SSL_fingerprint} = @pins == 1 ? $pins[0] : \@pins;
     }
     if (defined $scfg->{lb_ca_file} && length $scfg->{lb_ca_file}) {
         my $ca = $scfg->{lb_ca_file};
@@ -688,9 +696,11 @@ sub properties {
                 . "connection is verified against this fingerprint instead of a CA, "
                 . "which is the way to verify a LightOS cluster's own certificate (issued "
                 . "by the cluster's internal CA to the name api.service, identical on "
-                . "every node). Recommended wherever lb_ssl_verify cannot be used.",
+                . "every node). Recommended wherever lb_ssl_verify cannot be used. A "
+                . "comma-separated list is accepted so a certificate rotation can be "
+                . "staged: add the new fingerprint before, remove the old one after.",
             type        => 'string',
-            pattern     => '([A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}',
+            pattern     => '([A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}(,([A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2})*',
         },
         lb_ssl_verify => {
             description => "Verify the Lightbits API server's TLS certificate against "

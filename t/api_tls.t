@@ -79,11 +79,19 @@ is_deeply( ssl_opts({ lb_fingerprint => uc $FP_HEX }),
 is_deeply( ssl_opts({ lb_fingerprint => $FP_COLONS, lb_ssl_verify => 1, lb_ca_file => $ca }),
     { verify_hostname => 1, SSL_verify_mode => 1, SSL_fingerprint => "sha256\$$FP_HEX", SSL_ca_file => $ca },
     'fingerprint and CA options compose (a matching fingerprint wins, a mismatch falls back to the chain)' );
+# Rotation: several pins, the new certificate's added before the rotation and
+# the old one removed after, so no window where every entry is inactive.
+my $FP2_HEX = '0' x 64;
+is_deeply( ssl_opts({ lb_fingerprint => "$FP_COLONS, " . join(':', ('00') x 32) }),
+    { verify_hostname => 1, SSL_verify_mode => 1, SSL_fingerprint => ["sha256\$$FP_HEX", "sha256\$$FP2_HEX"] },
+    'a comma-separated list of fingerprints becomes a list of pins (order kept, whitespace tolerated)' );
+like( $class->properties()->{lb_fingerprint}{pattern}, qr/\(,/,
+    'lb_fingerprint schema pattern allows a comma-separated list' );
 is_deeply( ssl_opts({ lb_fingerprint => '' }), { verify_hostname => 0, SSL_verify_mode => 0 },
     'an empty lb_fingerprint (cleared via pvesm set) leaves verification off' );
 {
-    my $err = eval { ssl_opts({ lb_fingerprint => 'DD:89:8D' }); 1 };
-    ok( !$err, 'a malformed fingerprint dies rather than silently connecting unverified' );
+    my $err = eval { ssl_opts({ lb_fingerprint => "$FP_COLONS,DD:89:8D" }); 1 };
+    ok( !$err, 'a malformed fingerprint in the list dies rather than silently connecting unverified' );
     like( $@, qr/lb_fingerprint .*SHA-256/, 'the error names lb_fingerprint' );
 }
 like( $class->properties()->{lb_fingerprint}{pattern}, qr/\{31\}/,

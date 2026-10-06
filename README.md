@@ -220,7 +220,16 @@ echo | openssl s_client -connect 10.10.10.1:443 2>/dev/null | openssl x509 -fing
 pvesm set lb-storage --lb_fingerprint DD:89:8D:65:...:FA:F9
 ```
 
-From then on a connection to any endpoint whose certificate does not match fails with `certificate verify failed` and the storage shows as inactive, with the error in `pvesm status` and the task log. When the cluster's certificate is replaced (for example after a cluster re-install), read the new fingerprint and update the entry with the same command.
+From then on a connection to any endpoint whose certificate does not match fails with `certificate verify failed` and the storage shows as inactive, with the error in `pvesm status` and the task log.
+
+**Certificate rotation.** A pin identifies one exact certificate, so when the cluster's certificate is replaced (a certificate rotation, or a cluster re-install) the pin must follow. `lb_fingerprint` accepts a comma-separated list for exactly this: before the rotation, add the new certificate's fingerprint next to the current one; after the rotation, remove the old one. Do this on every Proxmox cluster that uses the storage.
+
+```bash
+pvesm set lb-storage --lb_fingerprint "<current>,<new>"     # before the rotation
+pvesm set lb-storage --lb_fingerprint "<new>"               # after it
+```
+
+What a mismatched pin affects: only the control plane. The NVMe/TCP data path carries no TLS, so running guests keep their I/O whatever happens to the API certificate. Everything that needs the API stops until the pin is corrected: the storage shows inactive, no new volumes, snapshots or resizes, and no VM starts or HA restarts on that storage (activation reads the volume's namespace and ACL from the API). Treat the pin update as part of the rotation runbook, not as an afterthought.
 
 **Alternatively, verify against a CA.** For a cluster fronted by a properly issued certificate (a load balancer or proxy), or addressed by a hostname that matches its certificate, enable regular peer and hostname verification against the host's trust store:
 

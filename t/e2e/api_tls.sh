@@ -14,7 +14,8 @@
 #   3. lb_fingerprint = the cluster certificate's SHA-256 (read with openssl)
 #      -> active, and a volume can be allocated and freed over the pinned
 #      connection,
-#   4. a wrong fingerprint -> inactive, "certificate verify failed",
+#   3b. old and new fingerprint listed together -> active (rotation staging),
+#   4. a wrong fingerprint alone -> inactive, "certificate verify failed",
 #   5. options cleared -> active again.
 #
 # The fingerprint is read from the first lb_api_host endpoint and must match
@@ -97,8 +98,12 @@ else
     bad "allocation over the pinned connection failed"
 fi
 
-echo "== 4. wrong fingerprint: must fail closed =="
+echo "== 3b. rotation staging: old (wrong) + new (right) fingerprint listed together =="
 WRONG="00${FP:2}"
+pvesm set "$TLS_STORAGE" --lb_fingerprint "$WRONG,$FP"
+if [ "$(status_of "$TLS_STORAGE")" = active ]; then ok "two pins, one matching -> storage active (rotation can be staged without a gap)"; else bad "two pins: $(status_err "$TLS_STORAGE")"; fi
+
+echo "== 4. wrong fingerprint: must fail closed =="
 pvesm set "$TLS_STORAGE" --lb_fingerprint "$WRONG"
 ST="$(status_of "$TLS_STORAGE")"; ERR="$(status_err "$TLS_STORAGE")"
 if [ "$ST" = inactive ] && grep -qi 'certificate verify failed' <<<"$ERR"; then ok "wrong fingerprint -> inactive with 'certificate verify failed'"; else bad "wrong fingerprint: status=$ST err=$(head -c 200 <<<"$ERR")"; fi
