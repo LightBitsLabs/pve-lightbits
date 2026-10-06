@@ -206,6 +206,8 @@ pvesm add lightbits lb-storage \
 
 To create volumes with more than one replica (on a multi-node cluster), add `--lb_replica_count 2` (or `3`). It defaults to `1`, and the value must be supported by the cluster — a single-node cluster only accepts `1`.
 
+**Security note:** as added above, the storage entry does not verify the cluster's TLS certificate (verification is off by default in this release, see the next section). Pinning the cluster certificate is one more `pvesm set` line and is the recommended follow-up for any entry that carries a production JWT.
+
 #### TLS verification for the API connection
 
 The plugin talks to the LightOS cluster API over HTTPS. Certificate verification is **off by default**, because a LightOS cluster serves its API with a certificate issued by its own per-cluster CA, and enabling verification unconditionally would break existing storage entries.
@@ -526,6 +528,14 @@ The Lightbits project may not exist, or the token does not have access to it. Ve
 curl -sk -H "Authorization: Bearer <jwt>" \
   https://<lightbits-ip>:443/api/v2/projects | python3 -m json.tool
 ```
+
+### `certificate verify failed` / storage inactive after enabling TLS verification
+
+`pvesm status` prints `Lightbits API GET /api/v2/cluster failed via <host>: 500 Can't connect to <host>:443 (certificate verify failed)` and the storage is inactive. The entry has `lb_fingerprint` or `lb_ssl_verify` set and the certificate the cluster presents does not pass:
+
+- **After a certificate rotation or a cluster re-install** with `lb_fingerprint` set: the pin still names the old certificate. Read the new fingerprint (`echo | openssl s_client -connect <host>:443 2>/dev/null | openssl x509 -fingerprint -sha256 -noout`) and update it with `pvesm set <storeid> --lb_fingerprint <new>`. Next time, stage the new fingerprint next to the old one before the rotation (see "TLS verification for the API connection").
+- **`lb_ssl_verify 1` against a LightOS cluster addressed by IP:** this cannot pass; the cluster's certificate is issued to `api.service` by a CA the cluster does not hand out. Use `lb_fingerprint` instead.
+- Running guests are not affected (the NVMe/TCP data path carries no TLS); VM starts and HA restarts on the storage are blocked until the entry verifies again. To get going immediately, clear the options (`pvesm set <storeid> --delete lb_fingerprint,lb_ssl_verify`) and re-pin afterwards.
 
 ### Storage shows 0 capacity / not active
 
