@@ -34,3 +34,19 @@ jobs:
 
       - name: ShellCheck
         run: shellcheck scripts/install.sh scripts/uninstall.sh
+
+      # --help must work for an unprivileged user (it is parsed before the root
+      # check), and an unrecognised option must fail rather than be ignored.
+      - name: Script usage output
+        run: |
+          set -euo pipefail
+          for s in scripts/install.sh scripts/uninstall.sh; do
+            for flag in -h --help; do
+              out=$("$s" "$flag")
+              grep -q '^Usage: ' <<<"$out" || { echo "$s $flag: no Usage: line"; exit 1; }
+            done
+            rc=0; "$s" --not-an-option >/dev/null 2>&1 || rc=$?
+            [[ $rc -eq 2 ]] || { echo "$s: unknown option exited $rc, expected 2"; exit 1; }
+            [[ -z "$("$s" --not-an-option 2>/dev/null)" ]] || { echo "$s: usage error wrote to stdout"; exit 1; }
+          done
+          echo "install.sh and uninstall.sh usage handling OK"

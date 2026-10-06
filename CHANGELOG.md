@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/install.sh` and `scripts/uninstall.sh` accept `-h` / `--help` and print full usage: what the script does step by step, its options, requirements, exit codes, and — for the uninstaller — what it deliberately leaves in place (your Lightbits volumes and snapshots, the `nvme-cli`/`discovery-client` packages, and live NVMe-oF connections). Arguments are parsed before the root check, so `--help` works as an unprivileged user.
+- CI asserts that both scripts print usage for `-h`/`--help` and reject an unknown option with exit status 2 without writing to stdout.
+
+### Changed
+
+- Both scripts now reject unrecognised arguments with an error and exit status 2 instead of ignoring them. Previously `install.sh` ignored every argument, and `uninstall.sh` only looked for an exact `--force`, so a typo such as `--forse` was silently discarded and the script carried on in non-forcing mode while the operator believed otherwise.
+
 ### Fixed
 
 - **A VM's cloud-init drive can now live on Lightbits storage** ([#41](https://github.com/LightBitsLabs/pve-lightbits/issues/41)). qemu-server recognises a cloud-init drive purely by its volume name, `vm-<vmid>-cloudinit`, and asks the storage to allocate exactly that name; `alloc_image` ignored the request and returned the usual `vm-<vmid>-<uuid>`, so Proxmox never treated the volume as cloud-init: no ISO was written into it, the guest booted without user-data, `qm cloudinit update` did nothing, and `qm destroy --purge` left the 4 MiB volume behind (one leaked volume per `qm clone --full --storage <lb>` or `qmrestore --storage <lb>` of a cloud-init VM, reproduced live 2026-10-04). Keeping the drive on `local` instead broke HA failback after a node loss until the stale local image was removed by hand. `alloc_image` now honours the cloud-init name, labels the volume `pveRole=cloudinit` and names it `vm-<vmid>-<vmgenid>-cloudinit` on LightOS; `parse_volname`, `path`, `list_images` and every method that takes a volname resolve such a volume through its labels, its device symlink is keyed on the volname, a second cloud-init volume for the same VM is refused with the existing one named, and a cloud-init volume that no longer exists is idempotent for `free_image` and snapshot deletion. Regular disks are unchanged.
