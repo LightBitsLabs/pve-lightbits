@@ -7,9 +7,9 @@
 # configured Lightbits storage. It drives the real qemu-server flows:
 #
 #   1. `qm create ... --ide2 <lb>:cloudinit` allocates the drive under the
-#      name PVE recognises (vm-<vmid>-cloudinit) and PVE writes the NoCloud ISO
-#      into the Lightbits volume (read back from the device with isoinfo),
-#   2. `qm cloudinit update` regenerates the ISO in place,
+#      name PVE recognises (vm-<vmid>-cloudinit) as a blank 4 MiB device,
+#   2. `qm cloudinit update` writes the NoCloud ISO into the Lightbits volume
+#      (read back from the device with isoinfo) and regenerates it in place,
 #   3. the storage listing shows the drive once, under that name, and a
 #      `qm rescan` adds no "unused" duplicate,
 #   4. `qm clone --full --storage <lb>` gives the clone a cloud-init drive on
@@ -139,13 +139,18 @@ if [ "$CI" = "${STORAGE}:vm-${VMID}-cloudinit" ]; then ok "cloud-init drive allo
 if qm cloudinit dump "$VMID" user 2>/dev/null | grep -q 'e2e-first'; then ok "PVE recognises the drive as cloud-init (qm cloudinit dump works)"; else bad "qm cloudinit dump does not see the drive"; fi
 DEV="$(activate "$CI")"
 if [ -b "$DEV" ] && [ -L "/dev/lightbits/$STORAGE/vm-${VMID}-cloudinit" ]; then ok "activation creates the volname-keyed symlink ($DEV)"; else bad "no block device / symlink for the cloud-init drive (path=$DEV)"; fi
-if iso_userdata "$DEV" | grep -q 'e2e-first'; then ok "NoCloud ISO with the user-data was written INTO the Lightbits volume"; else bad "no user-data readable from the cloud-init volume"; fi
+# PVE generates the ISO on first start or `qm cloudinit update`, not on create:
+# a fresh drive is a blank 4 MiB device (4096 KiB requested by qemu-server).
+SZ="$(blockdev --getsize64 "$DEV")"
+if [ "$SZ" = 4194304 ]; then ok "fresh cloud-init volume is the 4 MiB device PVE asked for"; else bad "cloud-init device size is $SZ"; fi
 
-echo "== 2. qm cloudinit update regenerates the ISO in place =="
+echo "== 2. qm cloudinit update writes the ISO into the Lightbits volume =="
+qm cloudinit update "$VMID" >/dev/null
+if iso_userdata "$DEV" | grep -q 'e2e-first'; then ok "NoCloud ISO with the user-data was written INTO the Lightbits volume"; else bad "no user-data readable from the cloud-init volume after cloudinit update"; fi
 qm set "$VMID" --ciuser e2e-second >/dev/null
 qm cloudinit update "$VMID" >/dev/null
 UD="$(iso_userdata "$DEV")"
-if grep -q 'e2e-second' <<<"$UD" && ! grep -q 'e2e-first' <<<"$UD"; then ok "regenerated ISO carries the new user-data"; else bad "ISO not regenerated (user-data: $(echo "$UD" | head -c 200))"; fi
+if grep -q 'e2e-second' <<<"$UD" && ! grep -q 'e2e-first' <<<"$UD"; then ok "a second update regenerates the ISO in place"; else bad "ISO not regenerated (user-data: $(echo "$UD" | head -c 200))"; fi
 deactivate "$CI"
 if [ -L "/dev/lightbits/$STORAGE/vm-${VMID}-cloudinit" ]; then bad "symlink still present after deactivation"; else ok "deactivation removes the symlink"; fi
 
