@@ -8,6 +8,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly, so a Proxmox storage API bump is caught even when nothing is being
+  # committed: the drift job below reads the upstream package index.
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -33,7 +38,7 @@ jobs:
         run: prove t/
 
       - name: ShellCheck
-        run: shellcheck scripts/install.sh scripts/uninstall.sh
+        run: shellcheck scripts/install.sh scripts/uninstall.sh t/ci/storage_api_drift.sh t/e2e/plugin_load.sh
 
       # --help must work for an unprivileged user (it is parsed before the root
       # check), and an unrecognised option must fail rather than be ignored.
@@ -50,3 +55,24 @@ jobs:
             [[ -z "$("$s" --not-an-option 2>/dev/null)" ]] || { echo "$s: usage error wrote to stdout"; exit 1; }
           done
           echo "install.sh and uninstall.sh usage handling OK"
+
+  # Fails when Proxmox publishes a libpve-storage-perl whose storage APIVER is
+  # newer than the plugin's $TESTED_APIVER: on updated hosts every pvesm call
+  # and GUI storage view would then log 'Plugin "...LightbitsPlugin" is
+  # implementing an older storage API, an upgrade is recommended' (and once
+  # APIVER - APIAGE passes it, the loader rejects the plugin). Reads the
+  # upstream pve-no-subscription and pvetest indexes, no Proxmox host needed.
+  storage-api-drift:
+    name: Storage API drift
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y binutils curl tar xz-utils zstd
+
+      - name: Compare upstream APIVER with $TESTED_APIVER
+        run: t/ci/storage_api_drift.sh

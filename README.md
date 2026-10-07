@@ -537,6 +537,18 @@ curl -sk -H "Authorization: Bearer <jwt>" \
 - **`lb_ssl_verify 1` against a LightOS cluster addressed by IP:** this cannot pass; the cluster's certificate is issued to `api.service` by a CA the cluster does not hand out. Use `lb_fingerprint` instead.
 - Running guests are not affected (the NVMe/TCP data path carries no TLS); VM starts and HA restarts on the storage are blocked until the entry verifies again. To get going immediately, clear the options (`pvesm set <storeid> --delete lb_fingerprint,lb_ssl_verify`) and re-pin afterwards.
 
+### `Plugin "PVE::Storage::Custom::LightbitsPlugin" is implementing an older storage API, an upgrade is recommended`
+
+Logged by every `pvesm` call and GUI storage view after a Proxmox update raised the storage plugin API version (`APIVER` in `/usr/share/perl5/PVE/Storage.pm`) above the highest version this plugin release has been validated against. The plugin still loads and works; the message is PVE asking for a plugin release that declares the new version. Check the two numbers:
+
+```bash
+perl -MPVE::Storage -e 'print PVE::Storage::APIVER(), " ", PVE::Storage::Custom::LightbitsPlugin->api(), "\n"'
+```
+
+If the first is higher, install the latest plugin release (each release tracks the current `libpve-storage-perl`; see the changelog for the API version it validates), then restart `pvedaemon`, `pveproxy` and `pvestatd` so the GUI picks it up. `t/e2e/plugin_load.sh` checks all of this on a node, and CI runs `t/ci/storage_api_drift.sh` weekly against the Proxmox package index so a bump is caught before users see it.
+
+---
+
 ### Storage shows 0 capacity / not active
 
 The REST API call to `/api/v2/cluster` failed silently. Check Proxmox logs:

@@ -32,6 +32,15 @@ my $class = 'PVE::Storage::Custom::LightbitsPlugin';
 
 my $TESTED = 16;   # keep in sync with $TESTED_APIVER in the plugin
 
+# Guard the "keep in sync" above: read the constant straight from the plugin
+# source, so a bump in one place without the other fails here.
+{
+    open my $fh, '<', "$FindBin::RealBin/../LightbitsPlugin.pm" or die "plugin source: $!";
+    my $src = do { local $/; <$fh> };
+    my ($src_tested) = $src =~ /^my \$TESTED_APIVER = (\d+);/m;
+    is( $src_tested, $TESTED, '$TESTED in this test matches $TESTED_APIVER in the plugin source' );
+}
+
 # ── api(): host at or below our tested version → match it exactly (no warning) ──
 for my $v (2, 11, 12, 13, 14, 15, 16) {
     $host_apiver = $v;

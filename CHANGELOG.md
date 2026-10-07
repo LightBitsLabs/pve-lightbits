@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `t/ci/storage_api_drift.sh` and a weekly-scheduled CI job: downloads the newest `libpve-storage-perl` from the Proxmox `pve-no-subscription` and `pvetest` indexes, reads its `APIVER`/`APIAGE`, and fails when it is newer than the plugin's `$TESTED_APIVER` (exit 1: updated hosts would log the "older storage API" warning; exit 2: the loader would reject the plugin), printing the relevant changelog lines. Catches a Proxmox API bump before users do, without a Proxmox host.
+- `t/e2e/plugin_load.sh` (live, on a real node): `pvesm status` emits no "older storage API" warning or plugin load error, the plugin's `api()` equals the host's `PVE::Storage::APIVER()`, the `lightbits` type is registered and the storage is active, and the PVE daemons have not logged the warning since the installed plugin file last changed.
+- `t/api_version.t` now reads `$TESTED_APIVER` from the plugin source and fails if the test's own constant drifts from it.
+- README troubleshooting entry for the "older storage API" message.
+
 ### Fixed
 
 - Bumped the validated storage API maximum from 15 to 16 for `libpve-storage-perl` 9.1.12 (published to `pve-no-subscription` on 2026-10-03; PVE 9.2.21 hosts updated since then run it). Hosts on that package logged `Plugin "PVE::Storage::Custom::LightbitsPlugin" is implementing an older storage API, an upgrade is recommended` on every `pvesm` and GUI storage call because `api()` clamped to 15. API 16 is additive: it adds volume-name/format helper methods on the base class (`get_parsed_format`, `is_valid_format`, `volname_for_format`, `get_format_extension`, `volname_with_format`) that PVE calls only from the base-class `alloc_image` and `rename_volume`, which this plugin does not use, and the `import` content type, which this plugin does not offer. No plugin behavior change.
