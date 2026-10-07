@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `t/ci/storage_api_drift.sh` and a weekly-scheduled CI job: downloads the newest `libpve-storage-perl` from the Proxmox `pve-no-subscription` and `pvetest` indexes, reads its `APIVER`/`APIAGE`, and fails when it is newer than the plugin's `$TESTED_APIVER` (exit 1: updated hosts would log the "older storage API" warning; exit 2: the loader would reject the plugin), printing the relevant changelog lines. Catches a Proxmox API bump before users do, without a Proxmox host.
+- `t/e2e/plugin_load.sh` (live, on a real node): `pvesm status` emits no "older storage API" warning or plugin load error, the plugin's `api()` equals the host's `PVE::Storage::APIVER()`, the `lightbits` type is registered and the storage is active, and the PVE daemons have not logged the warning since the installed plugin file last changed.
+- `t/api_version.t` now reads `$TESTED_APIVER` from the plugin source and fails if the test's own constant drifts from it.
+- README troubleshooting entry for the "older storage API" message.
+
+### Fixed
+
+- Bumped the validated storage API maximum from 15 to 16 for `libpve-storage-perl` 9.1.12 (published to `pve-no-subscription` on 2026-10-03; PVE 9.2.21 hosts updated since then run it). Hosts on that package logged `Plugin "PVE::Storage::Custom::LightbitsPlugin" is implementing an older storage API, an upgrade is recommended` on every `pvesm` and GUI storage call because `api()` clamped to 15. API 16 is additive: it adds volume-name/format helper methods on the base class (`get_parsed_format`, `is_valid_format`, `volname_for_format`, `get_format_extension`, `volname_with_format`) that PVE calls only from the base-class `alloc_image` and `rename_volume`, which this plugin does not use, and the `import` content type, which this plugin does not offer. No plugin behavior change.
+
 ## [0.9.6] - 2026-10-06 - Tech Preview
 
 Tech Preview release. A VM's cloud-init drive can now live on Lightbits storage, so `qm clone --full --storage <lb>` and `qmrestore --storage <lb>` of cloud-init VMs work and HA no longer depends on a cloud-init image on `local`; TLS verification of the API connection is available through certificate pinning (`lb_fingerprint`, the mode that works against a LightOS cluster) or a CA (`lb_ssl_verify` / `lb_ca_file`); `get_identity` is stable across spellings of the same endpoint list; and the install scripts have `--help`. Validated live on a 2-node Proxmox VE 9.2.21 cluster against a 3-node LightOS 3.20.1 cluster (cloud-init create/update/clone/restore/purge, offline migration of a cloud-init VM between nodes, TLS pin/mismatch/rotation staging, identity, plus the six earlier live suites). **TLS verification stays off by default in this release**, a deliberate decision: enabling it unconditionally would break every existing storage entry, and a LightOS cluster's own certificate can only be verified by pinning. Pin it (`pvesm set <storeid> --lb_fingerprint <sha256>`); the README documents the procedure and certificate rotation. Still ahead of production readiness.

@@ -30,10 +30,19 @@ my ($host_apiver, $host_apiage, $break) = (14, 5, 0);
 require "$FindBin::RealBin/../LightbitsPlugin.pm";
 my $class = 'PVE::Storage::Custom::LightbitsPlugin';
 
-my $TESTED = 15;   # keep in sync with $TESTED_APIVER in the plugin
+my $TESTED = 16;   # keep in sync with $TESTED_APIVER in the plugin
+
+# Guard the "keep in sync" above: read the constant straight from the plugin
+# source, so a bump in one place without the other fails here.
+{
+    open my $fh, '<', "$FindBin::RealBin/../LightbitsPlugin.pm" or die "plugin source: $!";
+    my $src = do { local $/; <$fh> };
+    my ($src_tested) = $src =~ /^my \$TESTED_APIVER = (\d+);/m;
+    is( $src_tested, $TESTED, '$TESTED in this test matches $TESTED_APIVER in the plugin source' );
+}
 
 # ── api(): host at or below our tested version → match it exactly (no warning) ──
-for my $v (2, 11, 12, 13, 14, 15) {
+for my $v (2, 11, 12, 13, 14, 15, 16) {
     $host_apiver = $v;
     is( $class->api(), $v, "api() returns host APIVER $v verbatim when <= tested ($TESTED)" );
 }
@@ -41,9 +50,9 @@ for my $v (2, 11, 12, 13, 14, 15) {
 # ── api(): host newer than we tested → claim our tested max ─────────────────────
 # api() returns our tested max in both cases; what differs is what the PVE loader
 # then does, since it only accepts api() within [APIVER - APIAGE, APIVER]:
-#   host one ahead (window min 16-5=11 <= 15): loads with the "older API" warning
-#   host far ahead (window min 99-2=97  >  15): rejected by the loader as too old
-$host_apiver = 16; $host_apiage = 5;
+#   host one ahead (window min 17-5=12 <= 16): loads with the "older API" warning
+#   host far ahead (window min 99-2=97  >  16): rejected by the loader as too old
+$host_apiver = 17; $host_apiage = 5;
 is( $class->api(), $TESTED, 'api() returns tested max when host is one ahead (loader loads it, with warning)' );
 
 $host_apiver = 99; $host_apiage = 2;
