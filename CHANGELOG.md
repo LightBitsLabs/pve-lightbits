@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-24
+
+Fixes an ownership gap found by fuzzing during the long-run validation of 1.0.0: a hand-made volume ID that named one VM but carried another VM's disk UUID was accepted, which let one VM attach, resize, snapshot or delete another VM's disk. Every path that hands out or changes a volume now checks the VM id in the volume name against the volume's ownership label. Volume IDs Proxmox itself generates are unaffected, so no configuration change is needed: upgrade by re-running `scripts/install.sh` on each node. Also adds README guidance on snapshots and clones made outside Proxmox, the recommended SCSI controller, and a link to the video walkthrough.
+
 ### Fixed
 
 - **A volume ID naming the wrong VM could reach another VM's disk.** The plugin resolves a volume by its LightOS UUID alone, while Proxmox takes the owning VM (and the permissions it checks) from the VM id in the volume name, and the two were never compared. A hand-made volume ID pairing one VM's id with another VM's disk UUID (`<storage>:vm-<A>-<uuid of VM B's disk>`) was accepted: `qm set <A> --scsiN <it>` attached VM B's disk to VM A, and `pvesm free <it>` deleted it. Every path that hands out or changes a volume (attach/size, activate, free, resize, snapshot, snapshot delete, rollback) now refuses a volume name whose VM id does not match the volume's `pveVmid` label, with an error naming both, before any change reaches the cluster. Volume IDs Proxmox itself generates are unaffected. Deleting a snapshot of a volume that no longer exists is now a no-op: with the volume gone there is nothing left to prove ownership with, so a snapshot it left behind is kept for the operator instead of being deleted through any volume name. New unit test `t/volid_vmid_mismatch.t`; verified live on Proxmox VE 9.2.21 against LightOS 3.21.1.
