@@ -197,7 +197,7 @@ Run `./scripts/install.sh --help` for the full description, requirements, and ex
 
 #### Upgrading from 1.0.x to 1.1.0 (breaking change)
 
-1.1.0 moves the API token (`lb_jwt`) out of `/etc/pve/storage.cfg` into a root-only file (see [Where the token is stored](#where-the-token-is-stored)). The file is shared by the whole Proxmox cluster, but **1.0.x only looks in `storage.cfg`**. Once a storage's token has moved, every node still on 1.0.x sends API requests without a token: on that node the storage shows **inactive**, and VM starts, migrations to it and HA restarts on it fail. The same happens if you downgrade a node to 1.0.x after the move.
+1.1.0 moves the API token (`lb_jwt`) out of `/etc/pve/storage.cfg` into a root-only file (see [Where the token is stored](#where-the-token-is-stored)). The file is shared by the whole Proxmox cluster, but **1.0.x only looks in `storage.cfg`**. Once a storage's token has moved, a node still on 1.0.x **no longer has that storage at all**: 1.0.x requires `lb_jwt` in the storage's section, so it skips the section (`pvesm status` logs `skip section '<storeid>': missing value for required option 'lb_jwt'` and the storage does not exist on that node). VM starts, migrations to that node and HA restarts on it fail for every VM with a disk on the storage; VMs already running there keep their I/O. The same happens if you downgrade a node to 1.0.x after the move.
 
 The move happens on the first `pvesm set` (any option, from any node, or an edit in the web interface) after the node that runs it is on 1.1.0. Until then the existing inline token keeps working on 1.0.x and 1.1.0 alike, so the upgrade itself is safe as long as you follow this order:
 
@@ -218,18 +218,21 @@ The move happens on the first `pvesm set` (any option, from any node, or an edit
 
 3. **Rotate the token** on the Lightbits cluster afterwards if `storage.cfg` has been copied anywhere (configuration backups, support bundles): the old copies still contain it.
 
-**Recovering a node that lost the storage after the move** (shows inactive, logs `401` from the Lightbits API): upgrade that node to 1.1.0 with `./scripts/install.sh`; it picks the token up from the shared file at once, no restart of VMs or further configuration needed.
+**Recovering a node that lost the storage after the move** (`skip section '<storeid>': missing value for required option 'lb_jwt'`): upgrade that node to 1.1.0 with `./scripts/install.sh`; it reads the token from the shared file at once, with no VM restart or further configuration needed.
 
-**Rolling back to 1.0.x after the move:** 1.0.x needs the token back in `storage.cfg`. On any node, before downgrading, put it back inline for each Lightbits storage (1.1.0 keeps accepting an inline token, so this is safe while nodes are mixed), then downgrade the nodes:
+**Rolling back to 1.0.x after the move:** 1.0.x needs the token back in `storage.cfg`. Before downgrading any node, put it back inline for **every** Lightbits storage, from a node still on 1.1.0 (1.1.0 accepts an inline token, so this is safe while nodes are mixed), then downgrade the nodes:
 
 ```bash
-ST=<storeid>
-TOKEN=$(head -n1 /etc/pve/priv/storage/$ST.pw)
-sed -i "/^lightbits: $ST\$/a\\tlb_jwt $TOKEN" /etc/pve/storage.cfg   # adds the lb_jwt line under the storage
-grep -A12 "^lightbits: $ST$" /etc/pve/storage.cfg | grep -c lb_jwt   # expect 1
+TAB=$(printf '\t')
+for ST in $(awk '/^lightbits: /{print $2}' /etc/pve/storage.cfg); do
+    grep -A15 "^lightbits: $ST$" /etc/pve/storage.cfg | grep -q "^${TAB}lb_jwt " && continue   # already inline
+    TOKEN=$(head -n1 /etc/pve/priv/storage/$ST.pw)
+    sed -i "/^lightbits: $ST\$/a\\${TAB}lb_jwt $TOKEN" /etc/pve/storage.cfg
+done
+grep -c "^${TAB}lb_jwt " /etc/pve/storage.cfg   # expect the number of Lightbits storages
 ```
 
-Do not run `pvesm set` on that storage from a 1.1.0 node afterwards, or the token moves again.
+Do not run `pvesm set` on these storages from a 1.1.0 node afterwards, or the tokens move again.
 
 ### 3. Add the storage
 
