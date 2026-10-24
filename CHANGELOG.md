@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **HA restarts failed after an upgrade until `pve-ha-lrm` was restarted.** `scripts/install.sh` and `scripts/uninstall.sh` restarted only `pvedaemon` and `pvestatd`, but `pve-ha-lrm`, `pve-ha-crm`, `pvescheduler` and `pveproxy` load storage plugins too and kept the previous module in memory. After an upgrade to 1.0.2 and the token move, the HA daemon on an upgraded node still ran the 1.0.1 module, skipped the storage (`missing value for required option 'lb_jwt'`), and every HA restart onto that node failed (found by the long-run test: HA VMs ended in `error` state after a node power cut). Both scripts now restart all of these daemons (`pveproxy` with a reload, the HA services only where they run); running VMs, including HA-managed ones, are not stopped or moved. On a node already upgraded with an earlier installer, run `systemctl restart pvescheduler pve-ha-lrm pve-ha-crm` and `systemctl reload-or-restart pveproxy`.
+
 ## [1.0.2] - 2026-10-24
 
 > **Upgrade every node of the Proxmox VE cluster before running `pvesm set` on a Lightbits storage.** This release moves the API token out of `storage.cfg` on the first `pvesm set`; after that, nodes still on 1.0.1 or earlier lose the storage until they are upgraded. Follow the README section "Upgrading to 1.0.2 (breaking change)", which also covers checking each node, recovery and rollback.
