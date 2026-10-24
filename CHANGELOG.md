@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-24
+
+First generally available release. The plugin now covers the full VM disk lifecycle on Lightbits storage across a Proxmox VE cluster: create, attach, resize, snapshot and rollback, live migration and HA failover between nodes, cloud-init drives, API failover across management nodes, and TLS certificate pinning. Since 0.9.7 it adds a warning when an API call had to fail over past an unreachable management node, rate-limited so a node that stays down does not flood the journal, and a clearer error when a snapshot is asked for as a block device.
+
+Validated on Proxmox VE 9.2.21 (`libpve-storage-perl` 9.1.13, storage API 16) on a 2-node HA cluster with a corosync QDevice against LightOS 3.21.1: the unit suite (590 tests), all ten live end-to-end suites (plugin load, identity, TLS, foreign volumes, snapshots, stale symlink, vanished resource, project isolation, orphan cleanup, cloud-init) and the Proxmox Storage Plugin Test Suite (PASS: 21 validated, 0 failed, including cross-node migration with data integrity, backup and restore of a running VM, and discard) pass; live migration between nodes (17 to 93 ms downtime) and HA failover after a hard power cut of a node (VM restarted on the surviving node in under 190 s, synced data intact) were verified on the same cluster. Earlier releases were validated on LightOS 3.18.4 and on 3-node LightOS 3.20.1 clusters, including a two-day reliability run with node failures and zero data verification errors.
+
+TLS verification of the API connection stays **off by default**, as in 0.9.6 and 0.9.7: turning it on unconditionally would break every existing storage entry, and a LightOS cluster's own certificate can only be verified by pinning. Pin it with `pvesm set <storeid> --lb_fingerprint <sha256>`; the README documents the procedure and certificate rotation. Upgrading from 0.9.x is a re-run of `scripts/install.sh` on each node; no storage configuration change is needed.
+
+Known limitations at 1.0.0, all documented in the README: a project-scoped JWT shows the storage inactive (use a cluster-level token); bursts of parallel allocations can hit Proxmox's per-storage lock timeout (retry or limit parallelism); snapshots cannot be read as a block device; installation needs internet access to fetch `discovery-client`.
+
+### Documentation
+
+- README: removed the outdated "No live migration" limitation (live migration has worked since 0.9.2, which grants each node access to the volume at activation) and added live migration and HA failover to the capability table and roadmap.
+- README: the multi-node `pvesm add` example now includes `--shared 1`, `--lb_owner_id` and `--lb_replica_count 3`, with an explanation of why a Proxmox VE cluster needs the first two and why `lb_owner_id` must be set before the first volume is created.
+- README: new Lightbits-side prerequisite to enable `EnableTrim` on the cluster (LightOS ships it off, so guest discards are dropped) and a note on thin provisioning; troubleshooting entry for a project-scoped JWT; known limitations for project-scoped tokens and allocation bursts; tested LightOS versions (3.18.4, 3.20.1, 3.21.1) and `libpve-storage-perl` up to 9.1.13 in the compatibility table; JWT path corrected to `/etc/lbcli/lbcli.yaml`.
+
 ### Fixed
 
 - `path()` no longer claims `Snapshots not supported by Lightbits plugin` when asked for a snapshot ([#48](https://github.com/LightBitsLabs/pve-lightbits/issues/48)). Snapshots are supported; what is not is reading a snapshot as a block device. The error now says so and names the snapshot: `Lightbits snapshot '<snap>' of <volname> cannot be accessed as a block device; roll back to it, or clone or back up the VM from its current state`. README Limitations entry; new unit test `t/path_snapshot.t`.
