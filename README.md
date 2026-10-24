@@ -96,7 +96,7 @@ lbcli update cluster-config --parameter=EnableTrim --value=true
 lbcli list cluster-config          # shows EnableTrim true
 ```
 
-Then set `discard=on` on the VM disks that should pass discards to the cluster (for example `qm set <vmid> --scsi0 <storage>:<volume>,discard=on`) and run `fstrim` periodically inside the guest (such as the `fstrim.timer` systemd unit). The Lightbits documentation advises against the `-o discard` mount option in guests, which can hurt filesystem performance. Space freed before TRIM was enabled is reclaimed by the next `fstrim`.
+Then set `discard=on` on the VM disks that should pass discards to the cluster (for example `qm set <vmid> --scsi0 <storage>:<volume>,discard=on`).
 
 The subsystem NQN is fetched automatically from the cluster API — you no longer need to look it up manually. If you prefer to pin it explicitly (e.g. for air-gapped environments where the API may be unreachable at connect time), you can still supply `--lb_subsys_nqn`.
 
