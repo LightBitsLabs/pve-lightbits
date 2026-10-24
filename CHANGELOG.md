@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - README recommends VirtIO SCSI (`--scsihw virtio-scsi-single`) as the SCSI controller for VMs on Lightbits storage; the VM example uses it. Proxmox's CLI/API default is the emulated `lsi` controller.
+- README caution: freeing a disk deletes every Lightbits snapshot of it, including ones made outside Proxmox; a clone made with `lbcli` from a snapshot of a Proxmox disk inherits its ownership labels and is treated as that VM's disk (rescan adds it as unused, destroy then deletes it) unless created with its own `--labels`.
 - README links the video walkthrough "Deployment Guide: NVMe/TCP Block Storage for Proxmox VE" on the Lightbits Labs YouTube channel.
 
 ## [1.0.0] - 2026-10-24

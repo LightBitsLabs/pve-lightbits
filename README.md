@@ -121,6 +121,16 @@ lbcli update volume --project-name <project> --uuid <volume-uuid> \
 
 This also means a LightOS project can be shared between Proxmox and other workloads: the plugin cannot touch what it did not create. Validated end-to-end on a pre-populated 3-node LightOS 3.20.1 cluster (`t/e2e/foreign_volumes.sh`).
 
+> **Caution: snapshots and clones of a Proxmox disk made outside Proxmox.**
+>
+> - **Snapshots are deleted with the disk.** When Proxmox frees a disk (destroying the VM, removing the disk, `pvesm free`), the plugin first deletes **every** Lightbits snapshot of that volume, including snapshots taken with `lbcli` or by a backup tool, so that no orphaned snapshots keep holding capacity. If you need such a snapshot after the VM is gone, clone it to a separate volume first (see the next point).
+> - **A clone inherits the disk's ownership labels unless you give it its own.** A volume created from a snapshot of a Proxmox disk (`lbcli create volume --source-snapshot-uuid ...`) copies the snapshot's labels, which are the Proxmox disk's `pveVmid` and `pveNode`. Proxmox then treats the clone as a disk of that VM: it appears in the VM's storage content, `qm disk rescan` adds it to the VM as an unused disk, and it is **deleted together with the VM** once it is referenced as an unused disk or when the VM is destroyed with *Destroy unreferenced disks owned by guest*. Always create such clones with labels of your own, which replace the inherited ones:
+>
+>   ```bash
+>   lbcli create volume --project-name <project> --name <clone-name> --size <size> --replica-count <n> \
+>     --acl <host-nqn> --source-snapshot-uuid <snapshot-uuid> --labels owner=<your-tool>
+>   ```
+
 #### Getting a JWT token
 
 Tokens are usually created during initial cluster deployment and can be found on the Lightbits cluster management node at:
