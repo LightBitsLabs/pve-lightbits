@@ -191,7 +191,7 @@ The installer:
 - Installs `LightbitsPlugin.pm` into the official third-party namespace at `/usr/share/perl5/PVE/Storage/Custom/`, where Proxmox **auto-loads** it — no patching of PVE's own files
 - Installs `nvme-cli` if not present
 - Installs and starts `discovery-client` if not present (best-effort — if the repo setup fails, e.g. no internet access, it warns and continues; install it manually before use in that case)
-- Restarts `pvedaemon` and `pvestatd`
+- Restarts every Proxmox daemon that loads storage plugins (`pvedaemon`, `pvestatd`, `pvescheduler`, `pveproxy`, and `pve-ha-lrm`/`pve-ha-crm` where they run), so all of them use the new version. Running VMs are not affected; restarting the HA services does not stop or move HA-managed VMs
 
 Run `./scripts/install.sh --help` for the full description, requirements, and exit codes. Re-running the installer is safe and is how you upgrade to a newer plugin version.
 
@@ -218,7 +218,7 @@ The move happens on the first `pvesm set` (any option, from any node, or an edit
 
 3. **Rotate the token** on the Lightbits cluster afterwards if `storage.cfg` has been copied anywhere (configuration backups, support bundles): the old copies still contain it.
 
-**Recovering a node that lost the storage after the move** (`skip section '<storeid>': missing value for required option 'lb_jwt'`): upgrade that node to 1.0.2 with `./scripts/install.sh`; it reads the token from the shared file at once, with no VM restart or further configuration needed.
+**Recovering a node that lost the storage after the move** (`skip section '<storeid>': missing value for required option 'lb_jwt'`): upgrade that node to 1.0.2 with `./scripts/install.sh`; it reads the token from the shared file at once, with no VM restart or further configuration needed. Earlier installers restarted only `pvedaemon` and `pvestatd`: on a node upgraded with one of them, `pve-ha-lrm` and `pvescheduler` still run the old module and HA restarts on that node fail with the same message: run `systemctl restart pvescheduler pve-ha-lrm pve-ha-crm` on it.
 
 **Rolling back to 1.0.1 after the move:** 1.0.1 and earlier need the token back in `storage.cfg`. Before downgrading any node, put it back inline for **every** Lightbits storage, from a node still on 1.0.2 (1.0.2 accepts an inline token, so this is safe while nodes are mixed), then downgrade the nodes:
 
@@ -383,7 +383,7 @@ The uninstaller then removes, in order:
 - The plugin file itself
   (`/usr/share/perl5/PVE/Storage/Custom/LightbitsPlugin.pm`).
 
-It then restarts `pvedaemon`/`pvestatd`.
+It then restarts the same Proxmox daemons as the installer.
 
 **Not removed by the uninstaller** (deliberately, since other things on the
 host may still depend on them): the `discovery-client` and `nvme-cli`
@@ -546,11 +546,7 @@ This means the `lightbits` storage type isn't registered. The plugin is auto-loa
 ls /usr/share/perl5/PVE/Storage/Custom/LightbitsPlugin.pm   # should exist
 ```
 
-If it is missing, re-run `scripts/install.sh` and restart the services:
-
-```bash
-systemctl restart pvedaemon pvestatd
-```
+If it is missing, re-run `scripts/install.sh` (it restarts the Proxmox daemons that load the plugin).
 
 ### `Cannot read /etc/nvme/hostnqn`
 

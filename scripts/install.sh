@@ -29,7 +29,9 @@ What it does:
      manager, which the plugin seeds instead of running 'nvme connect' itself.
      This step needs internet access to Lightbits' package repository; it is
      best-effort and warns rather than aborting if it fails.
-  4. Restarts pvedaemon and pvestatd so the new plugin is picked up.
+  4. Restarts the PVE daemons that load storage plugins (pvedaemon, pvestatd,
+     pvescheduler, pveproxy, and pve-ha-lrm/pve-ha-crm where running) so all of
+     them pick up the new plugin.
 
 It finishes with a health check for nvme-cli and discovery-client, then prints a
 'pvesm add' example. Re-running it is safe: it overwrites the plugin file and
@@ -151,7 +153,12 @@ if command -v discovery-client &>/dev/null; then
 fi
 
 echo "[4/4] Restarting PVE services..."
-systemctl restart pvedaemon pvestatd
+# Every daemon that loads storage plugins keeps the previous module in memory until it restarts.
+# pve-ha-lrm starts HA VMs after a failover and pvescheduler runs backups and replication, so an
+# upgrade that skips them leaves those paths on the old version (try-restart: only if running).
+systemctl restart pvedaemon pvestatd pvescheduler
+systemctl reload-or-restart pveproxy
+systemctl try-restart pve-ha-lrm pve-ha-crm
 echo "      -> Done."
 
 HEALTH_OK=1
