@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking for mixed-version clusters: upgrade every node before any `pvesm set`.** An existing storage keeps its token inline in `storage.cfg` and works unchanged until the first `pvesm set` on it (any option, or an edit in the web interface) from a node running this release, which moves the token to the private file. From then on a node still on 1.0.x no longer has the storage at all (1.0.x requires `lb_jwt` in `storage.cfg` and skips the section: `missing value for required option 'lb_jwt'`), so VM starts, migrations and HA restarts on that node fail; running VMs keep their I/O. See the README section "Upgrading from 1.0.x to 1.1.0" for the upgrade order, how to check each node, recovery of a node that lost the storage, and rollback to 1.0.x.
+- **Breaking for mixed-version clusters: upgrade every node before any `pvesm set`.** An existing storage keeps its token inline in `storage.cfg` and works unchanged until the first `pvesm set` on it (any option, or an edit in the web interface) from a node running this release, which moves the token to the private file. From then on a node still on 1.0.1 or earlier no longer has the storage at all (those versions require `lb_jwt` in `storage.cfg` and skips the section: `missing value for required option 'lb_jwt'`), so VM starts, migrations and HA restarts on that node fail; running VMs keep their I/O. See the README section "Upgrading to 1.0.2" for the upgrade order, how to check each node, recovery of a node that lost the storage, and rollback to 1.0.1.
 
 ## [1.0.1] - 2026-10-24
 
