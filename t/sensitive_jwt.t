@@ -107,6 +107,8 @@ my @seen;
         push @seen, $s->{lb_jwt};
         die "stop\n";    # one call is enough to see what token it carried
     };
+    # alloc_image and activate_volume read the host NQN first; never depend on the test host having one.
+    *PVE::Storage::Custom::LightbitsPlugin::_host_nqn = sub { 'nqn.2014-08.org.nvmexpress:uuid:test-host' };
 }
 my $U   = 'feedface-0000-4000-8000-0000000000aa';
 my $vol = "vm-100-$U";

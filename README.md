@@ -211,7 +211,7 @@ The move happens on the first `pvesm set` (any option, from any node, or an edit
 
    ```bash
    pvesm set <storeid> --lb_jwt '<token>'               # or any other pvesm set on the storage
-   grep -A12 "^lightbits: <storeid>$" /etc/pve/storage.cfg | grep lb_jwt   # expect no output
+   awk -v s=<storeid> '$0=="lightbits: " s {f=1; next} /^[a-z]+: /{f=0} f && $1=="lb_jwt"' /etc/pve/storage.cfg   # expect no output
    ls -l /etc/pve/priv/storage/<storeid>.pw                                  # -rw------- root
    pvesm status --storage <storeid>                                          # active, on every node
    ```
@@ -224,8 +224,9 @@ The move happens on the first `pvesm set` (any option, from any node, or an edit
 
 ```bash
 TAB=$(printf '\t')
+inline() { awk -v s="$1" '$0=="lightbits: " s {f=1; next} /^[a-z]+: /{f=0} f && $1=="lb_jwt" {print "yes"}' /etc/pve/storage.cfg; }
 for ST in $(awk '/^lightbits: /{print $2}' /etc/pve/storage.cfg); do
-    grep -A15 "^lightbits: $ST$" /etc/pve/storage.cfg | grep -q "^${TAB}lb_jwt " && continue   # already inline
+    [ -n "$(inline "$ST")" ] && continue   # this storage's own section already has the token inline
     TOKEN=$(head -n1 /etc/pve/priv/storage/$ST.pw)
     sed -i "/^lightbits: $ST\$/a\\${TAB}lb_jwt $TOKEN" /etc/pve/storage.cfg
 done
