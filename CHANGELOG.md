@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-10-24
+
+> **Upgrade every node of the Proxmox VE cluster before running `pvesm set` on a Lightbits storage.** This release moves the API token out of `storage.cfg` on the first `pvesm set`; after that, nodes still on 1.0.1 or earlier lose the storage until they are upgraded. Follow the README section "Upgrading to 1.0.2 (breaking change)", which also covers checking each node, recovery and rollback.
+
+The cluster-wide API token (`lb_jwt`) is now a Proxmox sensitive property: it is no longer stored in `/etc/pve/storage.cfg` or returned by the storage API, but kept in a root-only file under `/etc/pve/priv/storage/`. Existing storage entries keep working after the upgrade and are migrated by the first `pvesm set`.
+
 ### Security
 
 - **`lb_jwt` is now a Proxmox sensitive property.** The cluster-wide API token is no longer written to `/etc/pve/storage.cfg` (mode `0640`, readable by the `www-data` group that runs the web interface) and is no longer returned by `GET /storage/<storeid>` to roles with `Datastore.Allocate`. It is stored in `/etc/pve/priv/storage/<storeid>.pw`, root-only `0600`, replicated by the Proxmox cluster file system, and removed with the storage. Set and rotate it as before with `pvesm set <storeid> --lb_jwt <token>`. The token is loaded into a copy of the storage configuration at each entry point, never into Proxmox's own copy, so it cannot be written back to `storage.cfg`; a path without a token fails with an explicit error instead of an opaque `401`. New unit test `t/sensitive_jwt.t` (including a guard that fails for any future entry point that skips the token) and live test `t/e2e/sensitive_jwt.sh`; the other live tests read the token from the new location.
