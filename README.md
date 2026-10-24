@@ -89,14 +89,14 @@ You need to collect three values before installation:
 | **NVMe-oF data endpoint(s)** | Same IP(s) as the API nodes, port 4420. Example: `192.168.10.10:4420`. List **every data node** on a multi-node cluster as a comma-separated `lb_nvme_host` — this seeds `discovery-client` (see below), which then discovers nodes added to the cluster later on its own. It does **not** proactively drop the connection to a node removed from this list (see the note below) — shrinking the list only fully takes effect once this storage's own connection is cleared, on its next full deactivation. |
 | **Project name** | Optional. Default is `default`. A dedicated project per Proxmox cluster is the cleanest setup, but sharing a project with other consumers is safe — see [Volumes the plugin does not own](#volumes-the-plugin-does-not-own). |
 
-**Recommended: enable TRIM on the Lightbits cluster.** LightOS ships with `EnableTrim` off, and while it is off the discards a Proxmox guest sends (`fstrim`, or a VM disk with `discard=on`) do not free space on the cluster. Enable it once per cluster on a management node; the plugin does not change this setting:
+**Recommended: enable TRIM on the Lightbits cluster.** LightOS ships with `EnableTrim` off, and while it is off the discards a Proxmox guest sends do not free space on the cluster. Enable it once per cluster on a management node (LightOS 3.16 or later); the plugin does not change this setting. Once enabled it cannot be disabled. See [Lightbits TRIM Support](https://documentation.lightbitslabs.com/lightbits-private-cloud/lightbits--trim-support) in the Lightbits documentation.
 
 ```bash
 lbcli update cluster-config --parameter=EnableTrim --value=true
-lbcli get cluster-config --parameter=EnableTrim
+lbcli list cluster-config          # shows EnableTrim true
 ```
 
-Then set `discard=on` on the VM disks that should return freed space (for example `qm set <vmid> --scsi0 <storage>:<volume>,discard=on`).
+Then set `discard=on` on the VM disks that should pass discards to the cluster (for example `qm set <vmid> --scsi0 <storage>:<volume>,discard=on`) and run `fstrim` periodically inside the guest (such as the `fstrim.timer` systemd unit). The Lightbits documentation advises against the `-o discard` mount option in guests, which can hurt filesystem performance. Space freed before TRIM was enabled is reclaimed by the next `fstrim`.
 
 The subsystem NQN is fetched automatically from the cluster API — you no longer need to look it up manually. If you prefer to pin it explicitly (e.g. for air-gapped environments where the API may be unreachable at connect time), you can still supply `--lb_subsys_nqn`.
 
