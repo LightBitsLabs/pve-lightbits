@@ -36,6 +36,8 @@ Proxmox VE manages VM disks through a pluggable storage layer. This plugin teach
 
 ## Demo
 
+Video walkthrough: [Deployment Guide: NVMe/TCP Block Storage for Proxmox VE](https://www.youtube.com/watch?v=OmA8aSOxlPU&t=6s) on the Lightbits Labs YouTube channel.
+
 ![Lightbits Proxmox VE plugin demo](docs/Proxmox-lb-plugin-demo.gif)
 
 ---
@@ -410,9 +412,12 @@ pvesh create /nodes/$(hostname)/qemu \
   --name  test-lb-vm \
   --memory 512 \
   --cores  1 \
+  --scsihw virtio-scsi-single \
   --scsi0  lb-storage:4 \
   --ostype l26
 ```
+
+**Recommended: use VirtIO SCSI as the SCSI controller** for VMs with disks on Lightbits storage: `--scsihw virtio-scsi-single` (*VirtIO SCSI single* in the GUI's *Hardware → SCSI Controller*). The GUI's VM wizard selects it by default, but a VM created with `qm create` or the API without `--scsihw` gets Proxmox's default emulated `lsi` controller. To switch an existing VM, run `qm set <vmid> --scsihw virtio-scsi-single`; the change takes effect at the next VM start.
 
 Confirm the disk was created and its volid:
 

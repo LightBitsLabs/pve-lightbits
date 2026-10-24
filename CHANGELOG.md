@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- README recommends VirtIO SCSI (`--scsihw virtio-scsi-single`) as the SCSI controller for VMs on Lightbits storage; the VM example uses it. Proxmox's CLI/API default is the emulated `lsi` controller.
+- README links the video walkthrough "Deployment Guide: NVMe/TCP Block Storage for Proxmox VE" on the Lightbits Labs YouTube channel.
+
 ## [1.0.0] - 2026-10-24
 
 First generally available release. The plugin now covers the full VM disk lifecycle on Lightbits storage across a Proxmox VE cluster: create, attach, resize, snapshot and rollback, live migration and HA failover between nodes, cloud-init drives, API failover across management nodes, and TLS certificate pinning. Since 0.9.7 it adds a warning when an API call had to fail over past an unreachable management node, rate-limited so a node that stays down does not flood the journal, and a clearer error when a snapshot is asked for as a block device.
