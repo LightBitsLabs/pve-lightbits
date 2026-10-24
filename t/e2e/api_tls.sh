@@ -67,6 +67,17 @@ SAME=1
 for h in ${API_HOSTS//,/ }; do f="$(fingerprint_of "$h")"; [ "$f" = "$FP" ] || { echo "   NOTE: $h presents a different certificate ($f)"; SAME=0; }; done
 [ "$SAME" = 1 ] && ok "every lb_api_host endpoint presents the same certificate (one fingerprint covers the cluster)"
 
+# The real storage's whole definition, to prove at the end that nothing here
+# changed it. It may legitimately carry lb_fingerprint already (pinning is the
+# recommended setup), so compare the block instead of looking for options.
+scfg_block() {
+    awk -v s="$1" '
+        $0 ~ "^lightbits: " s "$" { in_blk = 1; print; next }
+        /^[a-z]+: / { in_blk = 0 }
+        in_blk' /etc/pve/storage.cfg
+}
+ORIG_BLOCK="$(scfg_block "$STORAGE")"
+
 cleanup() { pvesm remove "$TLS_STORAGE" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup
@@ -114,7 +125,7 @@ pvesm set "$TLS_STORAGE" --delete lb_fingerprint
 if [ "$(status_of "$TLS_STORAGE")" = active ]; then ok "fingerprint cleared -> storage active again"; else bad "after clearing: $(status_err "$TLS_STORAGE")"; fi
 
 echo "== 6. the real storage was never touched =="
-if ! grep -A12 "^lightbits: $STORAGE$" /etc/pve/storage.cfg | grep -q 'lb_fingerprint\|lb_ssl_verify'; then ok "$STORAGE still has no verification options"; else bad "$STORAGE was modified"; fi
+if [ "$(scfg_block "$STORAGE")" = "$ORIG_BLOCK" ]; then ok "$STORAGE definition unchanged"; else bad "$STORAGE was modified"; fi
 LEFT="$(pvesm list "$TLS_STORAGE" --vmid "$VMID" 2>/dev/null | awk 'NR>1' | wc -l)"
 if [ "$LEFT" = 0 ]; then ok "no probe volume left on the cluster"; else bad "$LEFT probe volume(s) left"; fi
 
