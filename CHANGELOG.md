@@ -21,7 +21,7 @@ Known limitations at 1.0.0, all documented in the README: a project-scoped JWT s
 
 - README: removed the outdated "No live migration" limitation (live migration has worked since 0.9.2, which grants each node access to the volume at activation) and added live migration and HA failover to the capability table and roadmap.
 - README: the multi-node `pvesm add` example now includes `--shared 1`, `--lb_owner_id` and `--lb_replica_count 3`, with an explanation of why a Proxmox VE cluster needs the first two and why `lb_owner_id` must be set before the first volume is created.
-- README: new Lightbits-side prerequisite to enable `EnableTrim` on the cluster (LightOS ships it off, so guest discards are dropped) and a note on thin provisioning; troubleshooting entry for a project-scoped JWT; known limitations for project-scoped tokens, allocation bursts and linked clones from templates (full clones only); tested LightOS versions (3.18.4, 3.20.1, 3.21.1) and `libpve-storage-perl` up to 9.1.13 in the compatibility table; JWT path corrected to `/etc/lbcli/lbcli.yaml`.
+- README: troubleshooting entry for a project-scoped JWT; known limitations for project-scoped tokens, allocation bursts and linked clones from templates (full clones only); tested LightOS versions (3.18.4, 3.20.1, 3.21.1) and `libpve-storage-perl` up to 9.1.13 in the compatibility table; JWT path corrected to `/etc/lbcli/lbcli.yaml`.
 
 ### Fixed
 
