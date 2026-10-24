@@ -155,6 +155,16 @@ If your cluster uses an external identity provider (e.g. ADFS), run `lbcli login
 
 For full reference see the [lbcli create jwt documentation](https://documentation.lightbitslabs.com/lightbits-cli-reference-guide/lbcli-create-jwt--2-1-and-above-).
 
+#### Where the token is stored
+
+Since 1.1.0, `lb_jwt` is a Proxmox **sensitive property**. Proxmox does not write it to `/etc/pve/storage.cfg` (mode `0640`, readable by the `www-data` group that runs the web interface) and does not return it from the storage API (`pvesh get /storage/<storeid>`). The plugin keeps it in `/etc/pve/priv/storage/<storeid>.pw`, root-only `0600`, which the Proxmox cluster file system replicates to every node; Proxmox's own Backup Server and ESXi storages keep their secrets in the same place. You set and rotate it exactly as before:
+
+```bash
+pvesm set lb-storage --lb_jwt '<new-jwt-token>'
+```
+
+Removing the storage (`pvesm remove`) deletes the file. Upgrading from 1.0.x needs care, see [Upgrading from 1.0.x to 1.1.0](#upgrading-from-10x-to-110-breaking-change).
+
 ---
 
 ## Installation
@@ -184,6 +194,42 @@ The installer:
 - Restarts `pvedaemon` and `pvestatd`
 
 Run `./scripts/install.sh --help` for the full description, requirements, and exit codes. Re-running the installer is safe and is how you upgrade to a newer plugin version.
+
+#### Upgrading from 1.0.x to 1.1.0 (breaking change)
+
+1.1.0 moves the API token (`lb_jwt`) out of `/etc/pve/storage.cfg` into a root-only file (see [Where the token is stored](#where-the-token-is-stored)). The file is shared by the whole Proxmox cluster, but **1.0.x only looks in `storage.cfg`**. Once a storage's token has moved, every node still on 1.0.x sends API requests without a token: on that node the storage shows **inactive**, and VM starts, migrations to it and HA restarts on it fail. The same happens if you downgrade a node to 1.0.x after the move.
+
+The move happens on the first `pvesm set` (any option, from any node, or an edit in the web interface) after the node that runs it is on 1.1.0. Until then the existing inline token keeps working on 1.0.x and 1.1.0 alike, so the upgrade itself is safe as long as you follow this order:
+
+1. **Upgrade every node of the cluster first** (`git pull` + `./scripts/install.sh` on each node), with no `pvesm set` on a Lightbits storage in between. Check every node:
+
+   ```bash
+   perl -MPVE::Storage::Custom::LightbitsPlugin -e 'print PVE::Storage::Custom::LightbitsPlugin->plugindata->{"sensitive-properties"}{lb_jwt} ? "1.1.0 or later\n" : "OLDER - upgrade this node\n"'
+   ```
+
+2. **Then move the token**, once per Lightbits storage, from any node:
+
+   ```bash
+   pvesm set <storeid> --lb_jwt '<token>'               # or any other pvesm set on the storage
+   grep -A12 "^lightbits: <storeid>$" /etc/pve/storage.cfg | grep lb_jwt   # expect no output
+   ls -l /etc/pve/priv/storage/<storeid>.pw                                  # -rw------- root
+   pvesm status --storage <storeid>                                          # active, on every node
+   ```
+
+3. **Rotate the token** on the Lightbits cluster afterwards if `storage.cfg` has been copied anywhere (configuration backups, support bundles): the old copies still contain it.
+
+**Recovering a node that lost the storage after the move** (shows inactive, logs `401` from the Lightbits API): upgrade that node to 1.1.0 with `./scripts/install.sh`; it picks the token up from the shared file at once, no restart of VMs or further configuration needed.
+
+**Rolling back to 1.0.x after the move:** 1.0.x needs the token back in `storage.cfg`. On any node, before downgrading, put it back inline for each Lightbits storage (1.1.0 keeps accepting an inline token, so this is safe while nodes are mixed), then downgrade the nodes:
+
+```bash
+ST=<storeid>
+TOKEN=$(head -n1 /etc/pve/priv/storage/$ST.pw)
+sed -i "/^lightbits: $ST\$/a\\tlb_jwt $TOKEN" /etc/pve/storage.cfg   # adds the lb_jwt line under the storage
+grep -A12 "^lightbits: $ST$" /etc/pve/storage.cfg | grep -c lb_jwt   # expect 1
+```
+
+Do not run `pvesm set` on that storage from a 1.1.0 node afterwards, or the token moves again.
 
 ### 3. Add the storage
 

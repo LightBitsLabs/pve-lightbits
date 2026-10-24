@@ -935,7 +935,10 @@ sub properties {
 sub options {
     return {
         lb_api_host   => {},
-        lb_jwt        => {},
+        # Optional in the schema: as a sensitive property it is extracted from the
+        # request before the remaining options are validated (as PVE's PBS plugin
+        # does with 'password'). A storage without one fails clearly in _api.
+        lb_jwt        => { optional => 1 },
         lb_project    => { optional => 1 },
         lb_nvme_host  => {},
         lb_subsys_nqn => { fixed => 1, optional => 1 },

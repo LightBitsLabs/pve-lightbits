@@ -39,6 +39,7 @@ ok($pd->{'sensitive-properties'}{lb_jwt}, 'lb_jwt is marked sensitive');
 my @secretish = grep { /jwt|password|secret|key(ring)?$|token/i } keys %{ $class->options() };
 is_deeply([sort @secretish], ['lb_jwt'], 'lb_jwt is the only secret-looking option');
 ok($class->properties()->{lb_jwt}, 'lb_jwt is still declared in properties()');
+ok($class->options()->{lb_jwt}{optional}, 'lb_jwt is optional in options(): Proxmox extracts it before validating the rest');
 
 # ── private file ─────────────────────────────────────────────────────────────
 P('_write_jwt', 'lb-a', $TOKEN);
@@ -123,6 +124,7 @@ my %entry = (
     volume_snapshot_rollback    => sub { $class->volume_snapshot_rollback($_[0], 'lb-a', $vol, 's1') },
     volume_snapshot_info        => sub { $class->volume_snapshot_info($_[0], 'lb-a', $vol) },
 );
+local $SIG{__WARN__} = sub { warn @_ unless $_[0] =~ /unreachable: stop/ };   # list_images/status warn on the stub's die
 for my $name (sort keys %entry) {
     @seen = ();
     my $s = { lb_api_host => '10.0.0.1:443', lb_project => 'default', lb_owner_id => 'lbpve4',
