@@ -228,7 +228,8 @@ inline() { awk -v s="$1" '$0=="lightbits: " s {f=1; next} /^[a-z]+: /{f=0} f && 
 for ST in $(awk '/^lightbits: /{print $2}' /etc/pve/storage.cfg); do
     [ -n "$(inline "$ST")" ] && continue   # this storage's own section already has the token inline
     TOKEN=$(head -n1 /etc/pve/priv/storage/$ST.pw)
-    sed -i "/^lightbits: $ST\$/a\\${TAB}lb_jwt $TOKEN" /etc/pve/storage.cfg
+    RE=$(printf '%s' "$ST" | sed 's/[.]/\\./g')   # storage ids may contain '.', which a sed address treats as "any character"
+    sed -i "/^lightbits: $RE\$/a\\${TAB}lb_jwt $TOKEN" /etc/pve/storage.cfg
 done
 grep -c "^${TAB}lb_jwt " /etc/pve/storage.cfg   # expect the number of Lightbits storages
 ```
