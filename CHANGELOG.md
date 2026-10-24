@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - API failover is no longer silent ([#47](https://github.com/LightBitsLabs/pve-lightbits/issues/47)): a call that succeeds only after skipping one or more `lb_api_host` endpoints logs one warning line naming the skipped endpoints and their status (`Lightbits API <method> <path> succeeded via <host> after failing via <host> (<status>); check those lb_api_host endpoints`), visible in the task log and the `pvestatd`/`pvedaemon` journals. Status lines only, never the token or response body. Retry rules unchanged. New unit test `t/api_failover_warning.t`; README troubleshooting entry.
+- The failover warning is rate-limited per endpoint ([#51](https://github.com/LightBitsLabs/pve-lightbits/issues/51)): the first failover past an endpoint warns at once, repeats stay silent for 10 minutes and then warn again as a reminder, and a call answered by that endpoint resets it. Without this, `pvestatd`'s status polling repeated the line every few seconds per storage and node for as long as one management node was down. State is one stamp file per endpoint under `/run/pve-lightbits/` (tmpfs), shared by all PVE processes; if it cannot be written the warning is emitted as before. Inside a PVE task (VM start, migrate, clone, resize) the warning is never suppressed and does not use up the shared allowance, so it always reaches the operation's task log.
 
 ## [0.9.7] - 2026-10-07 - Tech Preview
 

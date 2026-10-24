@@ -11,6 +11,7 @@ use JSON qw(encode_json decode_json);
 use LWP::UserAgent;
 use HTTP::Request;
 use File::Path qw(make_path);
+use Digest::SHA qw(sha1_hex);
 use Time::Local qw(timegm);
 use PVE::Tools qw(run_command);
 
@@ -111,9 +112,10 @@ sub _ssl_opts {
 # against a different endpoint risks a duplicate/orphaned resource. GET/HEAD
 # have no such side effect, so those are safe to retry.
 #
-# A call that only succeeds after skipping one or more endpoints warns once,
+# A call that only succeeds after skipping one or more endpoints warns,
 # naming the skipped endpoints, so a degraded management node shows up in the
 # task log and the daemon journals instead of only when every endpoint fails.
+# The warning is rate-limited per endpoint (see _failover_should_warn).
 sub _api {
     my ($scfg, $method, $path, $body, %opts) = @_;
 
@@ -158,7 +160,7 @@ sub _api {
 
         push @errors, "Lightbits API $method $path failed via $host: "
             . $res->status_line . " - " . $res->content . "\n";
-        push @skipped, "$host (" . $res->status_line . ")";
+        push @skipped, [$host, $res->status_line];
         # Read methods are retried on any transport failure (LWP's synthetic
         # "Internal response") or genuine 5xx. Mutating calls are retried on the
         # next endpoint ONLY when the failure provably happened before the
@@ -177,13 +179,64 @@ sub _api {
     die join('', @errors);
 }
 
-# One line per call that reached a live endpoint only after skipping others.
+# Failover warnings are rate-limited per endpoint, across processes: pvestatd
+# polls every storage about every 10 s on every node and each call starts at a
+# random endpoint, so an unlimited warning would repeat every few seconds for
+# as long as one management node is down. The first failover past an endpoint
+# warns at once; further ones stay silent for $FAILOVER_WARN_INTERVAL seconds,
+# then warn again as a reminder. A call answered by the endpoint clears its
+# state, so the next outage warns at once. The state is one stamp file per
+# endpoint on tmpfs (gone after a reboot); if it cannot be read or written the
+# warning is emitted anyway.
+#
+# Inside a PVE task (VM start, migrate, clone, resize: PVE renames the worker
+# "task UPID:..."), the warning is always emitted and the shared state is left
+# alone: it lands in that operation's task log, which
+# is what the operator is reading (a few lines per operation, one per API call
+# that failed over). Otherwise pvestatd, polling first, would
+# nearly always use up the allowance and task logs would never show it.
+our $FAILOVER_STATE_DIR     = '/run/pve-lightbits';
+our $FAILOVER_WARN_INTERVAL = 600;
+
+sub _failover_stamp {
+    my ($host) = @_;
+    # Hex digest of the endpoint: a fixed-charset file name, untainted for -T.
+    my ($hex) = sha1_hex($host) =~ /^([0-9a-f]{40})$/;
+    return "$FAILOVER_STATE_DIR/failover-$hex";
+}
+
+sub _failover_should_warn {
+    my ($host) = @_;
+    my $stamp = _failover_stamp($host);
+    my $mtime = (stat $stamp)[9];
+    return 0 if defined $mtime && time() - $mtime < $FAILOVER_WARN_INTERVAL;
+    eval {
+        make_path($FAILOVER_STATE_DIR, { mode => 0700 }) unless -d $FAILOVER_STATE_DIR;
+        open(my $fh, '>', $stamp) or die "open $stamp: $!\n";
+        close($fh);
+    };
+    return 1;
+}
+
+sub _in_pve_task { return $0 =~ /^task UPID:/ ? 1 : 0; }
+
+sub _failover_clear {
+    my ($host) = @_;
+    my $stamp = _failover_stamp($host);
+    unlink $stamp if -e $stamp;
+}
+
+# Called on every answered call: clears the answering endpoint's state, and
+# warns in one line about the skipped endpoints that are not rate-limited.
 # Status lines only: never the request headers (bearer token) or the body.
 sub _warn_failover {
     my ($method, $path, $host, @skipped) = @_;
-    return unless @skipped;
+    _failover_clear($host);
+    my @report = _in_pve_task() ? @skipped : grep { _failover_should_warn($_->[0]) } @skipped;
+    return unless @report;
     my $msg = "Lightbits API $method $path succeeded via $host after failing via "
-        . join(', ', @skipped) . "; check those lb_api_host endpoints\n";
+        . join(', ', map { "$_->[0] ($_->[1])" } @report)
+        . "; check those lb_api_host endpoints\n";
     $msg =~ s/[\r\n]+(?!\z)/ /g;
     warn $msg;
 }
