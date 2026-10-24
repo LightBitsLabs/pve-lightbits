@@ -206,14 +206,14 @@ pvesm add lightbits lb-storage \
   --content          images
 ```
 
-**On a Proxmox VE cluster, always add `--shared 1` and `--lb_owner_id`.** The storage definition in `/etc/pve/storage.cfg` is cluster-wide, so one `pvesm add` on any node covers every node.
+**On a Proxmox VE cluster of two or more nodes, always add `--shared 1` and `--lb_owner_id`**, whatever the size of the Lightbits cluster. The storage definition in `/etc/pve/storage.cfg` is cluster-wide, so one `pvesm add` on any node covers every node.
 
 - `--shared 1` tells Proxmox that every node sees the same volumes. Without it, Proxmox treats the storage as local to each node: live migration tries to copy the disks instead of handing the volume over, and HA cannot restart a VM on another node.
 - `--lb_owner_id` is the owner name the plugin writes on every volume it creates (see [Volumes the plugin does not own](#volumes-the-plugin-does-not-own)). It defaults to the node's hostname, which makes a volume created on one node invisible to the others. Set it to one name for the whole PVE cluster, such as the cluster name, **before the first volume is created**. Changing it later hides the volumes created under the old name until their labels are updated.
 - `--lb_replica_count 3` keeps three copies of each volume on a cluster of three or more nodes (see below).
 
-On a single-node cluster there's only one IP to give, so both options
-collapse to one endpoint each:
+On a single-node Lightbits cluster there's only one IP to give, so both endpoint options
+collapse to one endpoint each (on a multi-node Proxmox VE cluster, still add `--shared 1` and `--lb_owner_id` as above):
 
 ```bash
 pvesm add lightbits lb-storage \
@@ -639,7 +639,7 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 - **TLS verification off by default**: the API connection does not verify the cluster's certificate unless `lb_fingerprint` or `lb_ssl_verify` is set (see "TLS verification for the API connection"), because a LightOS cluster presents a certificate from its own cluster CA. Pinning the fingerprint is a one-line change per storage.
 - **Cluster-level JWT required**: a token scoped to a single project cannot read `/api/v2/cluster`, so the storage shows inactive (see [Storage shows 0 capacity / not active](#storage-shows-0-capacity--not-active)).
 - **Bursts of allocations can hit the storage lock timeout**: Proxmox serializes volume allocation per storage behind a cluster-wide lock. Creating many disks at once (for example an infrastructure-as-code run creating dozens of VMs in parallel) can fail some of them with `got lock timeout`; retry those or limit the parallelism.
-- **Internet access required during install**: `scripts/install.sh` fetches `discovery-client` from Lightbits' hosted package repository. Air-gapped/offline environments aren't supported yet — see the Roadmap below.
+- **Internet access used for the automatic `discovery-client` install**: `scripts/install.sh` fetches `discovery-client` from Lightbits' hosted package repository. Without internet access the installer warns and continues; install and start the `discovery-client` package manually before using the storage. A fully offline installation path is on the Roadmap below.
 
 ---
 
