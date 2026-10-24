@@ -149,9 +149,11 @@ sub _api {
             return $opts{missing_is_undef} ? undef : {};
         }
         if ($res->is_success) {
+            # Decode before warning so a 200 with a malformed body dies as the
+            # error it is instead of first logging a "succeeded via" line.
+            my $data = (!$res->content || $res->content eq '{}') ? {} : decode_json($res->content);
             _warn_failover($method, $path, $host, @skipped);
-            return {} if !$res->content || $res->content eq '{}';
-            return decode_json($res->content);
+            return $data;
         }
 
         push @errors, "Lightbits API $method $path failed via $host: "

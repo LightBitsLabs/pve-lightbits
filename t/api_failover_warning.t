@@ -110,6 +110,16 @@ like( $w->[0], qr/^Lightbits API POST /, '  ...naming the method' );
 is_deeply( $r, {}, '404 after failover still maps to an empty hashref' );
 is( scalar(@$w), 1, '  ...and warns about the skipped endpoint' );
 
+# ── a 200 with a malformed body after failover -> dies, no "succeeded" line ──
+%responses = (
+    '10.0.0.1:443' => refused('10.0.0.1:443'),
+    '10.0.0.2:443' => HTTP::Response->new(200, 'OK', ['Content-Type' => 'application/json'], '{not json'),
+    '10.0.0.3:443' => ok200(),
+);
+($r, $err, $w) = run('GET');
+ok( $err, 'a malformed 200 body after failover still dies' );
+is( scalar(@$w), 0, '  ...without first logging a failover success warning' );
+
 # ── a plain 404 or 4xx on the first endpoint -> no warning ───────────────────
 %responses = map { $_ => HTTP::Response->new(404, 'Not Found', [], '') } qw(10.0.0.1:443 10.0.0.2:443 10.0.0.3:443);
 ($r, $err, $w) = run('GET');
