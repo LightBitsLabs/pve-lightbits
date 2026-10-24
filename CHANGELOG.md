@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `path()` no longer claims `Snapshots not supported by Lightbits plugin` when asked for a snapshot ([#48](https://github.com/LightBitsLabs/pve-lightbits/issues/48)). Snapshots are supported; what is not is reading a snapshot as a block device. The error now says so and names the snapshot: `Lightbits snapshot '<snap>' of <volname> cannot be accessed as a block device; roll back to it, or clone or back up the VM from its current state`. README Limitations entry; new unit test `t/path_snapshot.t`.
+
 ### Changed
 
 - API failover is no longer silent ([#47](https://github.com/LightBitsLabs/pve-lightbits/issues/47)): a call that succeeds only after skipping one or more `lb_api_host` endpoints logs one warning line naming the skipped endpoints and their status (`Lightbits API <method> <path> succeeded via <host> after failing via <host> (<status>); check those lb_api_host endpoints`), visible in the task log and the `pvestatd`/`pvedaemon` journals. Status lines only, never the token or response body. Retry rules unchanged. New unit test `t/api_failover_warning.t`; README troubleshooting entry.

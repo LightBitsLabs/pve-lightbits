@@ -1285,7 +1285,10 @@ sub path {
     # snapshot-qualified volname would be treated as the live volume.
     my (undef, undef, $vmid, undef, $parsed_snap) = $class->parse_volname($volname);
     $snap //= $parsed_snap;
-    die "Snapshots not supported by Lightbits plugin\n" if $snap;
+    # Snapshots are supported (create, rollback, delete), but a Lightbits snapshot
+    # is not exposed as an attachable device, so it has no path of its own.
+    die "Lightbits snapshot '$snap' of $volname cannot be accessed as a block device; "
+        . "roll back to it, or clone or back up the VM from its current state\n" if $snap;
     # Return the owning vmid so PVE frees this disk when its VM is destroyed.
     return (_symlink_path($storeid, _link_name($volname)), $vmid, 'images');
 }
