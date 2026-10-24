@@ -218,7 +218,7 @@ The move happens on the first `pvesm set` (any option, from any node, or an edit
 
 3. **Rotate the token** on the Lightbits cluster afterwards if `storage.cfg` has been copied anywhere (configuration backups, support bundles): the old copies still contain it.
 
-**Recovering a node that lost the storage after the move** (`skip section '<storeid>': missing value for required option 'lb_jwt'`): upgrade that node to 1.0.2 with `./scripts/install.sh`; it reads the token from the shared file at once, with no VM restart or further configuration needed. Earlier installers restarted only `pvedaemon` and `pvestatd`: on a node upgraded with one of them, `pve-ha-lrm` and `pvescheduler` still run the old module and HA restarts on that node fail with the same message: run `systemctl restart pvescheduler pve-ha-lrm pve-ha-crm` on it.
+**Recovering a node that lost the storage after the move** (`skip section '<storeid>': missing value for required option 'lb_jwt'`): upgrade that node to 1.0.2 with `./scripts/install.sh`; it reads the token from the shared file at once, with no VM restart or further configuration needed. Earlier installers restarted only `pvedaemon` and `pvestatd`: on a node upgraded with one of them, `pve-ha-lrm` and `pvescheduler` still run the old module and HA restarts on that node fail with the same message: run `systemctl restart pvescheduler pve-ha-lrm pve-ha-crm` and `systemctl reload-or-restart pveproxy` on it.
 
 **Rolling back to 1.0.1 after the move:** 1.0.1 and earlier need the token back in `storage.cfg`. Before downgrading any node, put it back inline for **every** Lightbits storage, from a node still on 1.0.2 (1.0.2 accepts an inline token, so this is safe while nodes are mixed), then downgrade the nodes:
 
