@@ -110,6 +110,10 @@ sub _ssl_opts {
 # server (e.g. a proxy timeout after the backend succeeded), so retrying it
 # against a different endpoint risks a duplicate/orphaned resource. GET/HEAD
 # have no such side effect, so those are safe to retry.
+#
+# A call that only succeeds after skipping one or more endpoints warns once,
+# naming the skipped endpoints, so a degraded management node shows up in the
+# task log and the daemon journals instead of only when every endpoint fails.
 sub _api {
     my ($scfg, $method, $path, $body, %opts) = @_;
 
@@ -122,7 +126,7 @@ sub _api {
     );
 
     my $start = int(rand(scalar @endpoints));
-    my @errors;
+    my (@errors, @skipped);
     for my $i (0 .. $#endpoints) {
         my $host = $endpoints[($start + $i) % @endpoints];
         my $req  = HTTP::Request->new($method => "https://$host$path");
@@ -141,15 +145,20 @@ sub _api {
         # absent resource apart from an empty one and ask for undef instead;
         # see _get_existing.
         if ($res->code == 404) {
+            _warn_failover($method, $path, $host, @skipped);
             return $opts{missing_is_undef} ? undef : {};
         }
         if ($res->is_success) {
-            return {} if !$res->content || $res->content eq '{}';
-            return decode_json($res->content);
+            # Decode before warning so a 200 with a malformed body dies as the
+            # error it is instead of first logging a "succeeded via" line.
+            my $data = (!$res->content || $res->content eq '{}') ? {} : decode_json($res->content);
+            _warn_failover($method, $path, $host, @skipped);
+            return $data;
         }
 
         push @errors, "Lightbits API $method $path failed via $host: "
             . $res->status_line . " - " . $res->content . "\n";
+        push @skipped, "$host (" . $res->status_line . ")";
         # Read methods are retried on any transport failure (LWP's synthetic
         # "Internal response") or genuine 5xx. Mutating calls are retried on the
         # next endpoint ONLY when the failure provably happened before the
@@ -166,6 +175,17 @@ sub _api {
             || _failed_before_send($res);
     }
     die join('', @errors);
+}
+
+# One line per call that reached a live endpoint only after skipping others.
+# Status lines only: never the request headers (bearer token) or the body.
+sub _warn_failover {
+    my ($method, $path, $host, @skipped) = @_;
+    return unless @skipped;
+    my $msg = "Lightbits API $method $path succeeded via $host after failing via "
+        . join(', ', @skipped) . "; check those lb_api_host endpoints\n";
+    $msg =~ s/[\r\n]+(?!\z)/ /g;
+    warn $msg;
 }
 
 # True only for LWP's synthetic responses whose error text proves the request

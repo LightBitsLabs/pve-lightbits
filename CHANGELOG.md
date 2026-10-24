@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- API failover is no longer silent ([#47](https://github.com/LightBitsLabs/pve-lightbits/issues/47)): a call that succeeds only after skipping one or more `lb_api_host` endpoints logs one warning line naming the skipped endpoints and their status (`Lightbits API <method> <path> succeeded via <host> after failing via <host> (<status>); check those lb_api_host endpoints`), visible in the task log and the `pvestatd`/`pvedaemon` journals. Status lines only, never the token or response body. Retry rules unchanged. New unit test `t/api_failover_warning.t`; README troubleshooting entry.
+
 ## [0.9.7] - 2026-10-07 - Tech Preview
 
 Tech Preview release. Clears the `Plugin "PVE::Storage::Custom::LightbitsPlugin" is implementing an older storage API, an upgrade is recommended` line that every `pvesm` call and GUI storage view logs on Proxmox VE 9.2.21 hosts updated to `libpve-storage-perl` 9.1.12 (storage API 16; additive, no plugin behaviour change), and adds the tests that catch the next Proxmox API bump before users see it: a weekly CI check against the Proxmox package index, a live plugin-load end-to-end test, and a unit guard on the validated version. Validated live on a Proxmox VE 9.2.21 node running `libpve-storage-perl` 9.1.12 against a single-node LightOS 3.18.4 cluster: the warning reproduced with v0.9.6 and is gone with this release, `pvesm` and GUI storage calls are clean, and the nine live end-to-end suites (identity, TLS, snapshots, foreign volumes, stale symlink, vanished resource, project isolation, orphan cleanup, cloud-init) plus the new plugin-load check all pass; the same reproduction and fix were confirmed on a 2-node PVE 9.2.21 cluster against a 3-node LightOS 3.20.1 cluster. Still ahead of production readiness.
