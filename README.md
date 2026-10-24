@@ -82,7 +82,7 @@ You need to collect three values before installation:
 
 | Value | Where to find it |
 |---|---|
-| **API endpoint(s)** | IP or hostname of one or more Lightbits nodes, port 443. Example: `192.168.10.10:443`. List every management node you want failover across as a comma-separated `lb_api_host` (e.g. `192.168.10.10:443,192.168.10.11:443`) — the plugin tries each one on a connection failure or 5xx, so the storage keeps working even if one node is down. Failover only advances to the next endpoint for these retryable failures: a 4xx is treated as a definitive answer (every endpoint fronts the same cluster state) and stops there, and mutating calls (create/update/delete) are only tried against one endpoint per call, since a 5xx from those can arrive after the request already took effect. |
+| **API endpoint(s)** | IP or hostname of one or more Lightbits nodes, port 443. Example: `192.168.10.10:443`. List every management node you want failover across as a comma-separated `lb_api_host` (e.g. `192.168.10.10:443,192.168.10.11:443`) — the plugin tries each one on a connection failure or 5xx, so the storage keeps working even if one node is down. A call that only succeeds after skipping an endpoint logs a one-line warning naming the skipped endpoint (see [Troubleshooting](#lightbits-api--succeeded-via--after-failing-via-)), so a degraded node is visible before every endpoint fails. Failover only advances to the next endpoint for these retryable failures: a 4xx is treated as a definitive answer (every endpoint fronts the same cluster state) and stops there, and mutating calls (create/update/delete) are only tried against one endpoint per call, since a 5xx from those can arrive after the request already took effect. |
 | **JWT token** | Found at `/etc/lbcli/lbcli.yml` on the cluster management node, or generated with `lbcli create jwt`. |
 | **NVMe-oF data endpoint(s)** | Same IP(s) as the API nodes, port 4420. Example: `192.168.10.10:4420`. List **every data node** on a multi-node cluster as a comma-separated `lb_nvme_host` — this seeds `discovery-client` (see below), which then discovers nodes added to the cluster later on its own. It does **not** proactively drop the connection to a node removed from this list (see the note below) — shrinking the list only fully takes effect once this storage's own connection is cleared, on its next full deactivation. |
 | **Project name** | Optional. Default is `default`. A dedicated project per Proxmox cluster is the cleanest setup, but sharing a project with other consumers is safe — see [Volumes the plugin does not own](#volumes-the-plugin-does-not-own). |
@@ -505,6 +505,14 @@ modprobe nvme_tcp
 ```
 
 If `nvme list` shows the device but the plugin still fails, there may be a kernel/sysfs timing issue - the plugin polls for 30 seconds; a slow cluster might need a longer timeout. If this host's NQN isn't in the volume's ACL, the connection succeeds but the namespace never appears — check `/etc/nvme/hostnqn` against the volume's ACL via the Lightbits API/`lbcli`.
+
+### `Lightbits API ... succeeded via ... after failing via ...`
+
+```
+Lightbits API GET /api/v2/... succeeded via 192.168.10.11:443 after failing via 192.168.10.10:443 (500 Can't connect to 192.168.10.10:443 (Connection refused)); check those lb_api_host endpoints
+```
+
+The operation worked, but at least one endpoint in `lb_api_host` did not answer and the plugin failed over to the next one. It shows up in the task log of the operation and in the journal of `pvestatd`/`pvedaemon` (`journalctl -u pvestatd`), once per affected call. The storage keeps working as long as one endpoint answers, so treat it as an early warning: check the named node's management API (`curl -k https://<endpoint>/api/v2/cluster` from the Proxmox node, the node's api-service, the network path), or remove a decommissioned node from the list with `pvesm set <storeid> --lb_api_host ...`.
 
 ### `Lightbits API ... failed: 401 Unauthorized`
 
