@@ -89,6 +89,15 @@ You need to collect three values before installation:
 | **NVMe-oF data endpoint(s)** | Same IP(s) as the API nodes, port 4420. Example: `192.168.10.10:4420`. List **every data node** on a multi-node cluster as a comma-separated `lb_nvme_host` — this seeds `discovery-client` (see below), which then discovers nodes added to the cluster later on its own. It does **not** proactively drop the connection to a node removed from this list (see the note below) — shrinking the list only fully takes effect once this storage's own connection is cleared, on its next full deactivation. |
 | **Project name** | Optional. Default is `default`. A dedicated project per Proxmox cluster is the cleanest setup, but sharing a project with other consumers is safe — see [Volumes the plugin does not own](#volumes-the-plugin-does-not-own). |
 
+**Recommended: enable TRIM on the Lightbits cluster.** LightOS ships with `EnableTrim` off, and while it is off the discards a Proxmox guest sends (`fstrim`, or a VM disk with `discard=on`) do not free space on the cluster. Enable it once per cluster on a management node; the plugin does not change this setting:
+
+```bash
+lbcli update cluster-config --parameter=EnableTrim --value=true
+lbcli get cluster-config --parameter=EnableTrim
+```
+
+Then set `discard=on` on the VM disks that should return freed space (for example `qm set <vmid> --scsi0 <storage>:<volume>,discard=on`).
+
 The subsystem NQN is fetched automatically from the cluster API — you no longer need to look it up manually. If you prefer to pin it explicitly (e.g. for air-gapped environments where the API may be unreachable at connect time), you can still supply `--lb_subsys_nqn`.
 
 > **Note on discovery:** LightOS exposes a standard NVMe-oF Discovery Controller (port 8009), and this plugin uses Lightbits' official [`discovery-client`](https://github.com/LightBitsLabs/discovery-client) daemon to manage NVMe-oF connections rather than calling `nvme connect` itself. On volume activation, the plugin writes `lb_nvme_host`'s endpoints into a `discovery-client` config file (`/etc/discovery-client/discovery.d/lightbits-<storeid>.conf`); `discovery-client` then connects every data node and — unlike a static one-shot connect — keeps that current as cluster nodes are added later, with no config change needed on this host. It does **not** proactively remove connections for *removed* nodes on its own (they go stale) unless the cluster has `ctrlLossTMO` configured (LightOS 3.19.1+), so the plugin still runs an explicit `nvme disconnect` on the last deactivation of a subsystem.
