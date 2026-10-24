@@ -51,6 +51,8 @@ scfg_val() {
 }
 API_HOSTS="$(scfg_val "$STORAGE" lb_api_host)"
 JWT="$(scfg_val "$STORAGE" lb_jwt)"
+# lb_jwt is a sensitive property: once migrated it lives in /etc/pve/priv/storage/<storeid>.pw, not storage.cfg.
+[ -n "$JWT" ] || JWT="$(head -n1 "/etc/pve/priv/storage/$STORAGE.pw" 2>/dev/null)"
 PROJECT="$(scfg_val "$STORAGE" lb_project)"; PROJECT="${PROJECT:-default}"
 NVME_HOSTS="$(scfg_val "$STORAGE" lb_nvme_host)"
 if [ -z "$API_HOSTS" ] || [ -z "$JWT" ]; then echo "ABORT: storage '$STORAGE' not in /etc/pve/storage.cfg" >&2; exit 1; fi

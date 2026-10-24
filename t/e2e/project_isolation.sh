@@ -64,6 +64,8 @@ scfg_val() {   # scfg_val <storage-id> <key>
 }
 API_HOSTS="$(scfg_val "$STORAGE" lb_api_host)"
 JWT="$(scfg_val "$STORAGE" lb_jwt)"
+# lb_jwt is a sensitive property: once migrated it lives in /etc/pve/priv/storage/<storeid>.pw, not storage.cfg.
+[ -n "$JWT" ] || JWT="$(head -n1 "/etc/pve/priv/storage/$STORAGE.pw" 2>/dev/null)"
 NVME_HOSTS="$(scfg_val "$STORAGE" lb_nvme_host)"
 BASE_PROJECT="$(scfg_val "$STORAGE" lb_project)"; BASE_PROJECT="${BASE_PROJECT:-default}"
 REPLICAS="$(scfg_val "$STORAGE" lb_replica_count)"; REPLICAS="${REPLICAS:-1}"

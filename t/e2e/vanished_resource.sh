@@ -55,6 +55,8 @@ scfg_val() {
 }
 API_HOSTS="$(scfg_val "$STORAGE" lb_api_host)"
 JWT="$(scfg_val "$STORAGE" lb_jwt)"
+# lb_jwt is a sensitive property: once migrated it lives in /etc/pve/priv/storage/<storeid>.pw, not storage.cfg.
+[ -n "$JWT" ] || JWT="$(head -n1 "/etc/pve/priv/storage/$STORAGE.pw" 2>/dev/null)"
 PROJECT="$(scfg_val "$STORAGE" lb_project)"; PROJECT="${PROJECT:-default}"
 [ -n "$API_HOSTS" ] && [ -n "$JWT" ] || {
     echo "ABORT: storage '$STORAGE' not found in /etc/pve/storage.cfg (or missing lb_api_host/lb_jwt)." >&2
