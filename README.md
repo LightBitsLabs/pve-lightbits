@@ -20,6 +20,8 @@ Proxmox VE manages VM disks through a pluggable storage layer. This plugin teach
 | **Resize a VM disk** | The Lightbits volume is grown online or offline (`qm resize`); a running VM sees the new capacity immediately, no downtime |
 | **Snapshot a VM disk** | A point-in-time Lightbits snapshot is created (`qm snapshot`), project-scoped and crash-consistent for a running guest |
 | **Roll back a VM disk** | The volume is restored to a prior snapshot via the cluster's native server-side rollback (`qm rollback`) — near-instant, no host-side data copy |
+| **Live-migrate a VM** | `qm migrate --online` moves a running VM to another node of the PVE cluster without copying its disks: the target node is granted access to the same Lightbits volume and connects to it |
+| **HA failover** | With the VM managed by `ha-manager`, a failed node's VMs restart on a surviving node, which connects to the same volumes |
 | **Storage capacity** | Proxmox dashboard shows total / available / used space from the Lightbits cluster |
 
 ### Why use Lightbits instead of local storage?
@@ -69,7 +71,7 @@ The plugin has two communication paths to the Lightbits cluster:
 
 | Requirement | Notes |
 |---|---|
-| Proxmox VE **9.x** | Tested on 9.2 up to `libpve-storage-perl` 9.1.12 (storage API 16). Requires the PVE 9 storage API (`-blockdev`). |
+| Proxmox VE **9.x** | Tested on 9.2 up to `libpve-storage-perl` 9.1.13 (storage API 16). Requires the PVE 9 storage API (`-blockdev`). |
 | `nvme-cli` package | Provides the `nvme` command used for connect/disconnect. Ubuntu/Debian: `apt-get install -y nvme-cli`. RHEL/Rocky: `dnf install -y nvme-cli`. |
 | [`discovery-client`](https://github.com/LightBitsLabs/discovery-client) package | Lightbits' NVMe-oF connection manager. The plugin seeds it with this cluster's discovery endpoints instead of running `nvme connect` itself, so it discovers nodes added to the cluster later on its own (removed nodes still need the plugin's own disconnect — see the note below). `scripts/install.sh` attempts to install and start it automatically, best-effort (it warns and continues rather than aborting if that fails, e.g. no internet access — install and start it manually in that case; see [Verify NVMe-oF connectivity](#verify-nvme-of-connectivity-optional-pre-check) to check its status). |
 | `nvme_tcp` kernel module | Loaded automatically by nvme-cli on modern Proxmox kernels. |
@@ -83,9 +85,18 @@ You need to collect three values before installation:
 | Value | Where to find it |
 |---|---|
 | **API endpoint(s)** | IP or hostname of one or more Lightbits nodes, port 443. Example: `192.168.10.10:443`. List every management node you want failover across as a comma-separated `lb_api_host` (e.g. `192.168.10.10:443,192.168.10.11:443`) — the plugin tries each one on a connection failure or 5xx, so the storage keeps working even if one node is down. A call that only succeeds after skipping an endpoint logs a one-line warning naming the skipped endpoint (in every task log it affects; in the `pvestatd`/`pvedaemon` journal at most once per endpoint every 10 minutes) (see [Troubleshooting](#lightbits-api--succeeded-via--after-failing-via-)), so a degraded node is visible before every endpoint fails. Failover only advances to the next endpoint for retryable failures: a 4xx is treated as a definitive answer (every endpoint fronts the same cluster state) and stops there. Reads (GET/HEAD) fail over on any transport failure or 5xx. Mutating calls (create/update/delete) fail over only when the request provably never reached the endpoint (connection refused, connect timeout, unresolvable name, failed TLS handshake); a 5xx, a read timeout or a reset after sending stays a single attempt, since the change may already have taken effect. |
-| **JWT token** | Found at `/etc/lbcli/lbcli.yml` on the cluster management node, or generated with `lbcli create jwt`. |
+| **JWT token** | Found at `/etc/lbcli/lbcli.yaml` on the cluster management node, or generated with `lbcli create jwt`. |
 | **NVMe-oF data endpoint(s)** | Same IP(s) as the API nodes, port 4420. Example: `192.168.10.10:4420`. List **every data node** on a multi-node cluster as a comma-separated `lb_nvme_host` — this seeds `discovery-client` (see below), which then discovers nodes added to the cluster later on its own. It does **not** proactively drop the connection to a node removed from this list (see the note below) — shrinking the list only fully takes effect once this storage's own connection is cleared, on its next full deactivation. |
 | **Project name** | Optional. Default is `default`. A dedicated project per Proxmox cluster is the cleanest setup, but sharing a project with other consumers is safe — see [Volumes the plugin does not own](#volumes-the-plugin-does-not-own). |
+
+**Recommended: enable TRIM on the Lightbits cluster.** LightOS ships with `EnableTrim` off, and while it is off the discards a Proxmox guest sends do not free space on the cluster. Enable it once per cluster on a management node (LightOS 3.16 or later); the plugin does not change this setting. Once enabled it cannot be disabled. See [Lightbits TRIM Support](https://documentation.lightbitslabs.com/lightbits-private-cloud/lightbits--trim-support) in the Lightbits documentation.
+
+```bash
+lbcli update cluster-config --parameter=EnableTrim --value=true
+lbcli list cluster-config          # shows EnableTrim true
+```
+
+Then set `discard=on` on the VM disks that should pass discards to the cluster (for example `qm set <vmid> --scsi0 <storage>:<volume>,discard=on`).
 
 The subsystem NQN is fetched automatically from the cluster API — you no longer need to look it up manually. If you prefer to pin it explicitly (e.g. for air-gapped environments where the API may be unreachable at connect time), you can still supply `--lb_subsys_nqn`.
 
@@ -113,7 +124,7 @@ This also means a LightOS project can be shared between Proxmox and other worklo
 Tokens are usually created during initial cluster deployment and can be found on the Lightbits cluster management node at:
 
 ```
-/etc/lbcli/lbcli.yml
+/etc/lbcli/lbcli.yaml
 ```
 
 To generate a new token (LightOS 2.1 and above):
@@ -185,15 +196,24 @@ knows about it.
 
 ```bash
 pvesm add lightbits lb-storage \
-  --lb_api_host  192.168.10.10:443,192.168.10.11:443,192.168.10.12:443 \
-  --lb_jwt       'eyJhbGci...' \
-  --lb_nvme_host 192.168.10.10:4420,192.168.10.11:4420,192.168.10.12:4420 \
-  --lb_project   default \
-  --content      images
+  --lb_api_host      192.168.10.10:443,192.168.10.11:443,192.168.10.12:443 \
+  --lb_jwt           'eyJhbGci...' \
+  --lb_nvme_host     192.168.10.10:4420,192.168.10.11:4420,192.168.10.12:4420 \
+  --lb_project       default \
+  --lb_replica_count 3 \
+  --lb_owner_id      pve-cluster1 \
+  --shared           1 \
+  --content          images
 ```
 
-On a single-node cluster there's only one IP to give, so both options
-collapse to one endpoint each:
+**On a Proxmox VE cluster of two or more nodes, always add `--shared 1` and `--lb_owner_id`**, whatever the size of the Lightbits cluster. The storage definition in `/etc/pve/storage.cfg` is cluster-wide, so one `pvesm add` on any node covers every node.
+
+- `--shared 1` tells Proxmox that every node sees the same volumes. Without it, Proxmox treats the storage as local to each node: live migration tries to copy the disks instead of handing the volume over, and HA cannot restart a VM on another node.
+- `--lb_owner_id` is the owner name the plugin writes on every volume it creates (see [Volumes the plugin does not own](#volumes-the-plugin-does-not-own)). It defaults to the node's hostname, which makes a volume created on one node invisible to the others. Set it to one name for the whole PVE cluster, such as the cluster name, **before the first volume is created**. Changing it later hides the volumes created under the old name until their labels are updated.
+- `--lb_replica_count 3` keeps three copies of each volume on a cluster of three or more nodes (see below).
+
+On a single-node Lightbits cluster there's only one IP to give, so both endpoint options
+collapse to one endpoint each (on a multi-node Proxmox VE cluster, still add `--shared 1` and `--lb_owner_id` as above):
 
 ```bash
 pvesm add lightbits lb-storage \
@@ -204,7 +224,7 @@ pvesm add lightbits lb-storage \
   --content      images
 ```
 
-To create volumes with more than one replica (on a multi-node cluster), add `--lb_replica_count 2` (or `3`). It defaults to `1`, and the value must be supported by the cluster — a single-node cluster only accepts `1`.
+`--lb_replica_count` sets how many copies of each volume the cluster keeps: `3` on a cluster of three or more nodes, `2` or `3` on a multi-node cluster in general. It defaults to `1`, and the value must be supported by the cluster — a single-node cluster only accepts `1`.
 
 **Security note:** as added above, the storage entry does not verify the cluster's TLS certificate (verification is off by default in this release, see the next section). Pinning the cluster certificate is one more `pvesm set` line and is the recommended follow-up for any entry that carries a production JWT.
 
@@ -484,7 +504,6 @@ cat /etc/nvme/hostnqn   # should print a nqn.* string
 
 **Cold node (first VM start after the last Lightbits volume on this node was deactivated):** the plugin disconnects the subsystem on the last deactivation and discovery-client did not reliably act on the re-created config file afterwards. Since the version carrying this note, `activate_volume` restarts discovery-client itself when no connection appears within 10 s and logs `discovery-client has not connected … restarting discovery-client` in the task; a start that still fails after that points at a real connectivity or ACL problem. Keeping one always-on VM with a Lightbits disk per node (a "keeper") is no longer required to avoid this, but still avoids the ~10 s restart delay on the first start.
 
-
 The NVMe-oF connect never happened or the block device didn't show up. Check:
 
 ```bash
@@ -571,6 +590,8 @@ Also verify the API endpoint is correct (it must include the port):
 pvesm config lb-storage | grep lb_api_host
 ```
 
+If the journal shows `GET /api/v2/cluster failed ... 403`, the JWT is scoped to a project. The plugin reads the cluster's capacity and subsystem NQN from `/api/v2/cluster`, which needs a cluster-level token, so the storage shows inactive with a project-scoped token. Use a cluster-admin token (`/etc/lbcli/lbcli.yaml` on the management node).
+
 ---
 
 ## How It Works (Technical Detail)
@@ -613,32 +634,37 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 
 ## Limitations
 
-- **No live migration**: VM live migration requires shared storage visibility on both source and destination hosts. Multi-node deployment with a shared Lightbits cluster works structurally, but the per-host ACL in `alloc_image` currently restricts volume access to the allocating host's NQN. This needs to be addressed for migration support.
 - **Snapshots are not readable as a block device**: snapshots are native Lightbits snapshots (create, roll back, delete). A snapshot cannot be attached or read on its own, so operations that read a snapshot directly, such as backing up or cloning a VM *from* a snapshot, are not supported; roll back to it, or back up or clone the VM from its current state.
+- **No linked clones from templates**: a VM can be converted to a template, but its disks stay ordinary Lightbits volumes, so clones of it are full clones (`qm clone <template> <newid> --full`, or *Full Clone* mode in the GUI), each an independent copy of the template's disks. Linked clones, which share the template's base volume, are not supported.
 - **TLS verification off by default**: the API connection does not verify the cluster's certificate unless `lb_fingerprint` or `lb_ssl_verify` is set (see "TLS verification for the API connection"), because a LightOS cluster presents a certificate from its own cluster CA. Pinning the fingerprint is a one-line change per storage.
-- **Internet access required during install**: `scripts/install.sh` fetches `discovery-client` from Lightbits' hosted package repository. Air-gapped/offline environments aren't supported yet — see the Roadmap below.
+- **Cluster-level JWT required**: a token scoped to a single project cannot read `/api/v2/cluster`, so the storage shows inactive (see [Storage shows 0 capacity / not active](#storage-shows-0-capacity--not-active)).
+- **Bursts of allocations can hit the storage lock timeout**: Proxmox serializes volume allocation per storage behind a cluster-wide lock. Creating many disks at once (for example an infrastructure-as-code run creating dozens of VMs in parallel) can fail some of them with `got lock timeout`; retry those or limit the parallelism.
+- **Internet access used for the automatic `discovery-client` install**: `scripts/install.sh` fetches `discovery-client` from Lightbits' hosted package repository. Without internet access the installer warns and continues; install and start the `discovery-client` package manually before using the storage. A fully offline installation path is on the Roadmap below.
 
 ---
 
 ## Roadmap
 
-### Phase 1 — Single cluster, volume CRUD (current)
+### 1.0 (current)
 
 - Single Lightbits cluster per storage entry
 - Full volume lifecycle for VM disks: create, attach, detach, delete
 - Volume resize (grow), online and offline
 - Volume snapshots and rollback (native server-side rollback)
+- Live migration and HA failover across the nodes of a Proxmox VE cluster
+- API failover across management nodes, TLS certificate pinning
+- Cloud-init drives on Lightbits storage
 - Per-VM ownership labels and node-aware filtering (multi-hypervisor safety)
 - NVMe-oF TCP transport
 - Storage capacity reporting
 
-### Phase 2 and beyond
+### Beyond 1.0
 
 On the horizon:
 
 - Volume clones (including file-level recovery from a snapshot)
+- Linked clones from VM templates
 - Multi-tenancy and multi-cluster support
-- Live migration support
 - Broader Proxmox feature coverage (containers, ISO, vTPM, backups)
 - Debian packaging
 - Air-gapped/offline installation support
@@ -668,8 +694,8 @@ pve-lightbits/
 
 | Component | Version |
 |---|---|
-| Proxmox VE | 9.x (tested on 9.2) |
-| Lightbits LightOS | 3.x |
+| Proxmox VE | 9.x (tested on 9.2, `libpve-storage-perl` up to 9.1.13, storage API 16) |
+| Lightbits LightOS | 3.x (tested on 3.18.4, 3.20.1 and 3.21.1) |
 | Perl | 5.36+ |
 | Linux kernel | 5.0+ (nvme_tcp module required) |
 
