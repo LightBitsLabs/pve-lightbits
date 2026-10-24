@@ -39,6 +39,12 @@ no warnings 'redefine';
         return {} if $recheck eq 'gone';          # _api maps 404 -> {}
         return { state => $recheck };
     }
+    # The source volume exists and is this storage's own (VM 100): the ownership
+    # guard needs a live, labelled volume, or the delete is a no-op.
+    if ($method eq 'GET' && $path =~ m{^/api/v2/volumes/\Q$UUID\E\?}) {
+        return { UUID => $UUID, name => "vm-100-$UUID-disk-0",
+                 labels => [ { key => 'pveVmid', value => '100' }, { key => 'pveNode', value => 'lbpve-test' } ] };
+    }
     if ($method eq 'DELETE') {
         $deleted = $path;
         die $delete_err if $delete_err;
@@ -48,7 +54,7 @@ no warnings 'redefine';
 };
 use warnings 'redefine';
 
-my $scfg    = { lb_project => 'default' };
+my $scfg    = { lb_project => 'default', lb_owner_id => 'lbpve-test' };
 my $volname = "vm-100-$UUID";
 
 # ── present snapshot: deleted via the project-scoped endpoint ──────────────────

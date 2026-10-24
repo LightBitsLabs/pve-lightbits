@@ -111,4 +111,13 @@ eval { $class->free_image('lb', $scfg, $thief) };
 is($@, '', 'free of an already vanished volume is a no-op, whatever the name');
 is(scalar(@writes), 0, 'and writes nothing');
 
+# snapshot delete with the source volume gone: no ownership proof is left, so the
+# snapshot it left behind is not deleted (whatever the name says); still a no-op success
+@writes = ();
+eval { $class->volume_snapshot_delete($scfg, 'lb', $thief, 's1', 0) };
+is($@, '', 'snapshot delete of a vanished volume succeeds as a no-op');
+is(scalar(grep { $_->[0] eq 'DELETE' } @writes), 0, 'and does not delete the snapshot it left behind');
+eval { $class->volume_snapshot_delete($scfg, 'lb', $own, 's1', 0) };
+is(scalar(grep { $_->[0] eq 'DELETE' } @writes), 0, 'not even through the volume\'s own name');
+
 done_testing();

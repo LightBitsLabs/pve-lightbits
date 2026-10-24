@@ -1720,11 +1720,15 @@ sub volume_snapshot_delete {
     my $project = _project($scfg);
 
     # Ownership guard: a foreign volume's snapshots are not ours to delete. A
-    # volume that is already gone falls through to the idempotent path below
-    # (a vanished cloud-init volume has no UUID left to look up: nothing to do).
+    # volume that is already gone leaves nothing to prove ownership with (its
+    # labels went with it, and snapshots carry none), so a snapshot it left
+    # behind is not deleted from here: the call succeeds as a no-op and the
+    # snapshot stays for the operator. Likewise for a vanished cloud-init volume,
+    # which has no UUID left to look up.
     my $vol_uuid = _resolve_uuid($scfg, $volname);
     return undef unless defined $vol_uuid;
-    _owned_volume_or_die($scfg, $project, $vol_uuid, 'delete a snapshot of', $volname);
+    my $vol = _owned_volume_or_die($scfg, $project, $vol_uuid, 'delete a snapshot of', $volname);
+    return undef unless %$vol;
 
     # Idempotent on an already-removed snapshot: _snap_uuid dies with "not found"
     # when the snapshot is gone from the listing, which we treat as success (PVE
