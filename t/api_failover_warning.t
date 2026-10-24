@@ -198,6 +198,24 @@ like( $w->[0] // '', qr/after failing via 10\.0\.0\.2:443 \(/, '  ...naming only
 ($r, $err, $w) = run('GET', keep_state => 1, eps => '10.0.0.1:443,10.0.0.3:443');
 is( scalar(@$w), 0, 'a second storage listing the same down endpoint is not re-warned' );
 
+# inside a PVE task worker ($0 = "task UPID:...") the warning always reaches
+# the task log, and does not use up the shared allowance of the daemons
+{
+    %responses = ('10.0.0.1:443' => refused('10.0.0.1:443'), '10.0.0.2:443' => ok200(), '10.0.0.3:443' => ok200());
+    fresh_state();
+    local $0 = 'task UPID:pve1:0000ABCD:00012345:6ADC0000:qmstart:100:root@pam:';
+    my $n = 0;
+    for (1 .. 3) { ($r, $err, $w) = run('GET', keep_state => 1); $n += @$w; }
+    is( $n, 3, 'in a task worker: every failover warns (each lands in the task log of its operation)' );
+    my $st = do { local $PVE::Storage::Custom::LightbitsPlugin::FAILOVER_STATE_DIR = $STATE;
+        PVE::Storage::Custom::LightbitsPlugin::_failover_stamp('10.0.0.1:443') };
+    ok( !-e $st, '  ...without writing the shared rate-limit state' );
+}
+($r, $err, $w) = run('GET', keep_state => 1);
+is( scalar(@$w), 1, '  ...so the next daemon/CLI failover still warns at once' );
+($r, $err, $w) = run('GET', keep_state => 1);
+is( scalar(@$w), 0, '  ...and is rate-limited from there' );
+
 # fail open: state dir cannot be created -> warns every time, as before
 %responses = ('10.0.0.1:443' => refused('10.0.0.1:443'), '10.0.0.2:443' => ok200(), '10.0.0.3:443' => ok200());
 {

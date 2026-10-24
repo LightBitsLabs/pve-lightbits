@@ -188,6 +188,13 @@ sub _api {
 # state, so the next outage warns at once. The state is one stamp file per
 # endpoint on tmpfs (gone after a reboot); if it cannot be read or written the
 # warning is emitted anyway.
+#
+# Inside a PVE task (VM start, migrate, clone, resize: PVE renames the worker
+# "task UPID:..."), the warning is always emitted and the shared state is left
+# alone: it lands in that operation's task log, which
+# is what the operator is reading (a few lines per operation, one per API call
+# that failed over). Otherwise pvestatd, polling first, would
+# nearly always use up the allowance and task logs would never show it.
 our $FAILOVER_STATE_DIR     = '/run/pve-lightbits';
 our $FAILOVER_WARN_INTERVAL = 600;
 
@@ -211,6 +218,8 @@ sub _failover_should_warn {
     return 1;
 }
 
+sub _in_pve_task { return $0 =~ /^task UPID:/ ? 1 : 0; }
+
 sub _failover_clear {
     my ($host) = @_;
     my $stamp = _failover_stamp($host);
@@ -223,7 +232,7 @@ sub _failover_clear {
 sub _warn_failover {
     my ($method, $path, $host, @skipped) = @_;
     _failover_clear($host);
-    my @report = grep { _failover_should_warn($_->[0]) } @skipped;
+    my @report = _in_pve_task() ? @skipped : grep { _failover_should_warn($_->[0]) } @skipped;
     return unless @report;
     my $msg = "Lightbits API $method $path succeeded via $host after failing via "
         . join(', ', map { "$_->[0] ($_->[1])" } @report)
