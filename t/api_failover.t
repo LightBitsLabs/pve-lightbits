@@ -14,6 +14,9 @@ use HTTP::Response;
 
 use lib "$FindBin::RealBin/stubs";
 require "$FindBin::RealBin/../LightbitsPlugin.pm";
+use File::Temp qw(tempdir);
+# Failover-warning state goes to a scratch dir, never the real /run.
+$PVE::Storage::Custom::LightbitsPlugin::FAILOVER_STATE_DIR = tempdir(CLEANUP => 1);
 
 # Responses keyed by endpoint string (e.g. "10.0.0.1:443"); each entry is
 # either an HTTP::Response to return, or a coderef called with no args for

@@ -16,10 +16,17 @@ use HTTP::Response;
 # Pin _api's random start index so the endpoint order is deterministic:
 # $main::START picks the first endpoint tried (int(rand(n)) == $main::START).
 our $START = 0;
-BEGIN { *CORE::GLOBAL::rand = sub { return $main::START + 0.5 }; }
+# Only calls from the plugin are pinned; File::Temp and others keep real rand.
+BEGIN {
+    *CORE::GLOBAL::rand = sub (;$) {
+        return $main::START + 0.5 if (caller)[0] eq 'PVE::Storage::Custom::LightbitsPlugin';
+        return CORE::rand(@_ ? $_[0] : 1);
+    };
+}
 
 use lib "$FindBin::RealBin/stubs";
 require "$FindBin::RealBin/../LightbitsPlugin.pm";
+use File::Temp qw(tempdir);
 
 my %responses;
 my @calls;
@@ -43,8 +50,15 @@ sub refused { HTTP::Response->new(500, "Can't connect to $_[0] (Connection refus
 sub ok200   { HTTP::Response->new(200, 'OK', ['Content-Type' => 'application/json'], '{"ok":1}') }
 
 # Run one _api call, collecting warnings; returns (result, error, \@warnings).
+# Each call gets a fresh rate-limit state dir unless keep_state is set, so the
+# per-endpoint rate limit (tested at the end of this file) does not leak
+# between the independent cases above it.
+my $STATE = tempdir(CLEANUP => 1);
+sub fresh_state { $STATE = tempdir(CLEANUP => 1); }
 sub run {
     my ($method, %o) = @_;
+    fresh_state() unless $o{keep_state};
+    local $PVE::Storage::Custom::LightbitsPlugin::FAILOVER_STATE_DIR = $STATE;
     @calls = ();
     my @w;
     local $SIG{__WARN__} = sub { push @w, $_[0] };
@@ -139,5 +153,64 @@ is( scalar(@$w), 0, '  ...and emits no failover warning' );
 %responses = ('10.0.0.1:443' => ok200());
 ($r, $err, $w) = run('GET', eps => '10.0.0.1:443');
 is( scalar(@$w), 0, 'a single endpoint that answers does not warn' );
+
+# ── rate limit (issue #51): once per endpoint per outage, then a reminder ───
+$START = 0;
+%responses = ('10.0.0.1:443' => refused('10.0.0.1:443'), '10.0.0.2:443' => ok200(), '10.0.0.3:443' => ok200());
+fresh_state();
+($r, $err, $w) = run('GET', keep_state => 1);
+is( scalar(@$w), 1, 'rate limit: the first failover past an endpoint warns' );
+($r, $err, $w) = run('GET', keep_state => 1);
+is( $err, '', '  ...a repeat still succeeds' );
+is( scalar(@$w), 0, '  ...but does not warn again within the interval' );
+for (1 .. 5) { ($r, $err, $w) = run('GET', keep_state => 1); last if @$w; }
+is( scalar(@$w), 0, '  ...nor on any further repeat' );
+
+# after the interval: reminder
+my $stamp = do { local $PVE::Storage::Custom::LightbitsPlugin::FAILOVER_STATE_DIR = $STATE;
+    PVE::Storage::Custom::LightbitsPlugin::_failover_stamp('10.0.0.1:443') };
+like( $stamp, qr{^\Q$STATE\E/failover-[0-9a-f]{40}\z}, 'state is one stamp per endpoint, hex-named, in the state dir' );
+ok( -e $stamp, '  ...and exists while the endpoint is down' );
+no warnings 'once';
+my $old = time() - $PVE::Storage::Custom::LightbitsPlugin::FAILOVER_WARN_INTERVAL - 1;
+use warnings 'once';
+utime($old, $old, $stamp);
+($r, $err, $w) = run('GET', keep_state => 1);
+is( scalar(@$w), 1, 'after the interval the warning repeats as a reminder' );
+
+# recovery: a call answered by that endpoint clears its state
+%responses = map { $_ => ok200() } qw(10.0.0.1:443 10.0.0.2:443 10.0.0.3:443);
+($r, $err, $w) = run('GET', keep_state => 1);
+ok( !-e $stamp, 'a call answered by the endpoint clears its state' );
+%responses = ('10.0.0.1:443' => refused('10.0.0.1:443'), '10.0.0.2:443' => ok200(), '10.0.0.3:443' => ok200());
+($r, $err, $w) = run('GET', keep_state => 1);
+is( scalar(@$w), 1, '  ...so the next outage warns at once' );
+
+# two skipped, one of them suppressed: the warning names only the other
+%responses = ('10.0.0.1:443' => refused('10.0.0.1:443'), '10.0.0.2:443' => refused('10.0.0.2:443'), '10.0.0.3:443' => ok200());
+($r, $err, $w) = run('GET', keep_state => 1);
+is( scalar(@$w), 1, 'two skipped endpoints, one already reported: one warning' );
+unlike( $w->[0] // '', qr/10\.0\.0\.1:443/, '  ...not naming the suppressed endpoint' );
+like( $w->[0] // '', qr/after failing via 10\.0\.0\.2:443 \(/, '  ...naming only the newly failed one' );
+
+# the rate limit is per endpoint, not per storage: another list sharing an
+# endpoint shares its state (same host:port = same management node)
+($r, $err, $w) = run('GET', keep_state => 1, eps => '10.0.0.1:443,10.0.0.3:443');
+is( scalar(@$w), 0, 'a second storage listing the same down endpoint is not re-warned' );
+
+# fail open: state dir cannot be created -> warns every time, as before
+%responses = ('10.0.0.1:443' => refused('10.0.0.1:443'), '10.0.0.2:443' => ok200(), '10.0.0.3:443' => ok200());
+{
+    my $file = "$STATE/not-a-dir";
+    open(my $fh, '>', $file) or die; close $fh;
+    local $PVE::Storage::Custom::LightbitsPlugin::FAILOVER_STATE_DIR = "$file/sub";
+    my $n = 0;
+    for (1 .. 3) {
+        my @ww; local $SIG{__WARN__} = sub { push @ww, $_[0] };
+        eval { PVE::Storage::Custom::LightbitsPlugin::_api(scfg(), 'GET', '/api/v2/x') };
+        $n += @ww;
+    }
+    is( $n, 3, 'unwritable state dir: fails open, warns on every failover' );
+}
 
 done_testing();
