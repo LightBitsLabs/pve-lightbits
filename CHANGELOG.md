@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **`lb_jwt` is now a Proxmox sensitive property.** The cluster-wide API token is no longer written to `/etc/pve/storage.cfg` (mode `0640`, readable by the `www-data` group that runs the web interface) and is no longer returned by `GET /storage/<storeid>` to roles with `Datastore.Allocate`. It is stored in `/etc/pve/priv/storage/<storeid>.pw`, root-only `0600`, replicated by the Proxmox cluster file system, and removed with the storage. Set and rotate it as before with `pvesm set <storeid> --lb_jwt <token>`. The token is loaded into a copy of the storage configuration at each entry point, never into Proxmox's own copy, so it cannot be written back to `storage.cfg`; a path without a token fails with an explicit error instead of an opaque `401`. New unit test `t/sensitive_jwt.t` (including a guard that fails for any future entry point that skips the token) and live test `t/e2e/sensitive_jwt.sh`; the other live tests read the token from the new location.
+
+### Changed
+
+- **Breaking for mixed-version clusters: upgrade every node before any `pvesm set`.** An existing storage keeps its token inline in `storage.cfg` and works unchanged until the first `pvesm set` on it (any option, or an edit in the web interface) from a node running this release, which moves the token to the private file. From then on a node still on 1.0.1 or earlier no longer has the storage at all (those versions require `lb_jwt` in `storage.cfg` and skips the section: `missing value for required option 'lb_jwt'`), so VM starts, migrations and HA restarts on that node fail; running VMs keep their I/O. See the README section "Upgrading to 1.0.2" for the upgrade order, how to check each node, recovery of a node that lost the storage, and rollback to 1.0.1.
+
 ## [1.0.1] - 2026-10-24
 
 Fixes an ownership gap found by fuzzing during the long-run validation of 1.0.0: a hand-made volume ID that named one VM but carried another VM's disk UUID was accepted, which let one VM attach, resize, snapshot or delete another VM's disk. Every path that hands out or changes a volume now checks the VM id in the volume name against the volume's ownership label. Volume IDs Proxmox itself generates are unaffected, so no configuration change is needed: upgrade by re-running `scripts/install.sh` on each node. Also adds README guidance on snapshots and clones made outside Proxmox, the recommended SCSI controller, and a link to the video walkthrough.

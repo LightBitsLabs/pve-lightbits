@@ -13,10 +13,123 @@ use HTTP::Request;
 use File::Path qw(make_path);
 use Digest::SHA qw(sha1_hex);
 use Time::Local qw(timegm);
-use PVE::Tools qw(run_command);
+use PVE::Tools qw(run_command file_set_contents file_read_firstline);
 
 # Overridable in tests.
 our $SYMLINK_DIR = '/dev/lightbits';
+
+# ── Credential storage ────────────────────────────────────────────────────────
+#
+# lb_jwt is declared sensitive in plugindata(), so Proxmox keeps it out of
+# /etc/pve/storage.cfg (root:www-data 0640, readable by every process in the
+# www-data group, and returned by GET /storage/<id>) and hands it to the hooks
+# below, which persist it under /etc/pve/priv/storage instead: root-only 0600,
+# replicated to every node by pmxcfs. Proxmox's own PBS and ESXi plugins keep
+# their secrets in the same place.
+#
+# Proxmox does not read it back: a sensitive property never appears in $scfg.
+# Every entry point that can reach the API therefore starts with
+# `$scfg = _with_jwt($scfg, $storeid)`, which returns a COPY carrying the token.
+# Proxmox's own hash is never modified, so the token can never be written back
+# to storage.cfg by a later save of that hash. _api dies with a clear message
+# if the token is missing on some path rather than sending an empty bearer.
+
+# Overridable in tests.
+our $PRIV_DIR = '/etc/pve/priv/storage';
+
+sub _jwt_file {
+    my ($storeid) = @_;
+    # Storage ids are validated by Proxmox (pve-storage-id); untaint and refuse
+    # anything that could leave $PRIV_DIR all the same.
+    my ($id) = ($storeid // '') =~ /\A([a-z][a-z0-9\-_.]*[a-z0-9])\z/i
+        or die "invalid storage id '" . ($storeid // '') . "'\n";
+    return "$PRIV_DIR/$id.pw";
+}
+
+sub _write_jwt {
+    my ($storeid, $jwt) = @_;
+    make_path($PRIV_DIR);
+    file_set_contents(_jwt_file($storeid), "$jwt\n", 0600);
+}
+
+sub _delete_jwt {
+    my ($storeid) = @_;
+    my $f = _jwt_file($storeid);
+    unlink $f if -e $f;
+}
+
+sub _read_jwt {
+    my ($storeid) = @_;
+    my $f = _jwt_file($storeid);
+    return undef unless -e $f;
+    my $jwt = file_read_firstline($f);
+    return (defined $jwt && length $jwt) ? $jwt : undef;
+}
+
+# $scfg for the rest of this call, with the token available. A token already in
+# $scfg wins: that is a storage entry created before lb_jwt became sensitive,
+# still carrying it in storage.cfg, which keeps working untouched until any
+# `pvesm set` migrates it (on_update_hook_full). Otherwise the private file is
+# read into a shallow copy; the caller's hash is left as it was.
+sub _with_jwt {
+    my ($scfg, $storeid) = @_;
+    return $scfg if defined $scfg->{lb_jwt} && length $scfg->{lb_jwt};
+    return $scfg unless defined $storeid && length $storeid;
+    my $jwt = _read_jwt($storeid);
+    return $scfg unless defined $jwt;
+    return { %$scfg, lb_jwt => $jwt };
+}
+
+# Persist (or remove) the token the API layer extracted from the request.
+# PVE::Tools::extract_sensitive_params signals a deletion with an explicit
+# undef, so "key absent" (keep the stored token) and "key present but undef"
+# (delete it) are told apart with exists, not defined.
+sub _apply_sensitive {
+    my ($storeid, $sensitive) = @_;
+    return unless exists $sensitive->{lb_jwt};
+    my $jwt = $sensitive->{lb_jwt};
+    if (defined $jwt && length $jwt) {
+        _write_jwt($storeid, $jwt);
+    } else {
+        _delete_jwt($storeid);
+    }
+    return;
+}
+
+sub on_add_hook {
+    my ($class, $storeid, $scfg, %sensitive) = @_;
+    _apply_sensitive($storeid, \%sensitive);
+    return undef;
+}
+
+# Used on hosts whose storage API predates on_update_hook_full.
+sub on_update_hook {
+    my ($class, $storeid, $scfg, %sensitive) = @_;
+    _apply_sensitive($storeid, \%sensitive);
+    return undef;
+}
+
+# Here $scfg is the live stored config, which Proxmox writes back to
+# storage.cfg right after this returns. That is what lets an entry created
+# before lb_jwt became sensitive be migrated: its plaintext token is moved to
+# the private file and deleted from the config, on any `pvesm set`.
+sub on_update_hook_full {
+    my ($class, $storeid, $scfg, $update, $delete, $sensitive) = @_;
+    $sensitive //= {};
+    _apply_sensitive($storeid, $sensitive);
+    if (defined $scfg->{lb_jwt}) {
+        _write_jwt($storeid, $scfg->{lb_jwt})
+            if !exists $sensitive->{lb_jwt} && length $scfg->{lb_jwt};
+        delete $scfg->{lb_jwt};
+    }
+    return undef;
+}
+
+sub on_delete_hook {
+    my ($class, $storeid, $scfg) = @_;
+    _delete_jwt($storeid);
+    return undef;
+}
 
 # ── Lightbits REST API helper ─────────────────────────────────────────────────
 
@@ -121,6 +234,13 @@ sub _api {
 
     my @endpoints = _api_endpoints($scfg->{lb_api_host});
     die "lb_api_host is not configured\n" unless @endpoints;
+    # The token comes from the private file via _with_jwt (it never sits in
+    # Proxmox's $scfg). Fail clearly if a path missed it: an empty bearer token
+    # would only surface as an opaque 401.
+    die "Lightbits API token is not available for this storage. Set it with "
+        . "'pvesm set <storeid> --lb_jwt <token>'.\n"
+        unless defined $scfg->{lb_jwt} && length $scfg->{lb_jwt};
+
 
     my $ua = LWP::UserAgent->new(
         ssl_opts => _ssl_opts($scfg),
@@ -723,6 +843,10 @@ sub parse_volname {
 sub plugindata {
     return {
         content => [ { images => 1, none => 1 }, { images => 1 } ],
+        # Keeps lb_jwt out of storage.cfg (see "Credential storage" above). This
+        # REPLACES Proxmox's built-in default list (encryption-key, keyring,
+        # master-pubkey, password), so any future secret must be listed here too.
+        'sensitive-properties' => { lb_jwt => 1 },
         format  => [ { raw => 1 }, 'raw' ],
     };
 }
@@ -811,7 +935,10 @@ sub properties {
 sub options {
     return {
         lb_api_host   => {},
-        lb_jwt        => {},
+        # Optional in the schema: as a sensitive property it is extracted from the
+        # request before the remaining options are validated (as PVE's PBS plugin
+        # does with 'password'). A storage without one fails clearly in _api.
+        lb_jwt        => { optional => 1 },
         lb_project    => { optional => 1 },
         lb_nvme_host  => {},
         lb_subsys_nqn => { fixed => 1, optional => 1 },
@@ -831,6 +958,7 @@ sub options {
 
 sub status {
     my ($class, $storeid, $scfg, $cache) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $data = eval { _api($scfg, 'GET', '/api/v2/cluster', undef, timeout => 5) };
     if ($@) {
@@ -1106,6 +1234,7 @@ sub _next_disk_index {
 
 sub list_images {
     my ($class, $storeid, $scfg, $vmid, $vollist, $cache) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $project = _project($scfg);
     my $data    = eval { _api($scfg, 'GET', "/api/v2/volumes?projectName=$project", undef, timeout => 5) };
@@ -1160,6 +1289,7 @@ sub list_images {
 # a filesystem path, which block storage like ours doesn't have.
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
     my $project = _project($scfg);
     my $uuid    = _resolve_existing_uuid($scfg, $volname);
     # Ownership guard: this is what `qm set --scsiN <volid>` consults for a
@@ -1191,6 +1321,7 @@ sub _discard_orphan_volume {
 
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $project  = _project($scfg);
     my $host_nqn = _host_nqn();
@@ -1314,6 +1445,7 @@ sub alloc_image {
 
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $project = _project($scfg);
     my $link    = _symlink_path($storeid, _link_name($volname));
@@ -1399,17 +1531,20 @@ sub _ensure_host_acl {
 
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
     make_path("$SYMLINK_DIR/$storeid");
     return 1;
 }
 
 sub deactivate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
     return 1;
 }
 
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     # Resolve the Lightbits UUID (untainted) for the API calls; the symlink is
     # keyed on the volname-derived link name (the UUID, or the cloud-init name).
@@ -1526,6 +1661,7 @@ sub _storeid_still_in_use {
 
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $subsys_nqn = _subsys_nqn($scfg);
     my $link       = _symlink_path($storeid, _link_name($volname));
@@ -1560,6 +1696,7 @@ sub deactivate_volume {
 
 sub volume_has_feature {
     my ($class, $scfg, $feature, $storeid, $volname, $snapname, $running, $opts) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     # Nested {feature}{key}{format}, mirroring the base plugin. $key is 'snap'
     # when a snapshot name is in play, else 'base'/'current'. We support raw
@@ -1596,6 +1733,7 @@ sub volume_has_feature {
 # requires the underlying device to already be bigger.
 sub volume_resize {
     my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $project = _project($scfg);
     my $uuid    = _resolve_existing_uuid($scfg, $volname);
@@ -1655,6 +1793,7 @@ sub volume_resize {
 # only (it does not touch the NVMe device).
 sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $project  = _project($scfg);
     my $vol_uuid = _resolve_existing_uuid($scfg, $volname);
@@ -1716,6 +1855,7 @@ sub _delete_snapshot {
 
 sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snap, $running) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $project = _project($scfg);
 
@@ -1754,6 +1894,7 @@ sub volume_snapshot_delete {
 # config lock, before the guest is stopped.
 sub volume_rollback_is_possible {
     my ($class, $scfg, $storeid, $volname, $snap, $blockers) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $project   = _project($scfg);
     my $vol_uuid  = _resolve_existing_uuid($scfg, $volname);
@@ -1785,6 +1926,7 @@ sub volume_rollback_is_possible {
 # device is not open; we rescan the controller afterwards to refresh capacity.
 sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $project   = _project($scfg);
     my $vol_uuid  = _resolve_existing_uuid($scfg, $volname);
@@ -1824,6 +1966,7 @@ sub volume_snapshot_rollback {
 # are reported.
 sub volume_snapshot_info {
     my ($class, $scfg, $storeid, $volname) = @_;
+    $scfg = _with_jwt($scfg, $storeid);
 
     my $project  = _project($scfg);
     my $vol_uuid = _resolve_existing_uuid($scfg, $volname);
