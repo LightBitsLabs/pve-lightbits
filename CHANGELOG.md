@@ -15,13 +15,13 @@ Validated on Proxmox VE 9.2.21 (`libpve-storage-perl` 9.1.13, storage API 16) on
 
 TLS verification of the API connection stays **off by default**, as in 0.9.6 and 0.9.7: turning it on unconditionally would break every existing storage entry, and a LightOS cluster's own certificate can only be verified by pinning. Pin it with `pvesm set <storeid> --lb_fingerprint <sha256>`; the README documents the procedure and certificate rotation. Upgrading from 0.9.x is a re-run of `scripts/install.sh` on each node; no storage configuration change is needed.
 
-Known limitations at 1.0.0, all documented in the README: a project-scoped JWT shows the storage inactive (use a cluster-level token); bursts of parallel allocations can hit Proxmox's per-storage lock timeout (retry or limit parallelism); snapshots cannot be read as a block device; installation needs internet access to fetch `discovery-client`.
+Known limitations at 1.0.0, all documented in the README: a project-scoped JWT shows the storage inactive (use a cluster-level token); bursts of parallel allocations can hit Proxmox's per-storage lock timeout (retry or limit parallelism); snapshots cannot be read as a block device; clones of a template are full clones (no linked clones); installation needs internet access to fetch `discovery-client`.
 
 ### Documentation
 
 - README: removed the outdated "No live migration" limitation (live migration has worked since 0.9.2, which grants each node access to the volume at activation) and added live migration and HA failover to the capability table and roadmap.
 - README: the multi-node `pvesm add` example now includes `--shared 1`, `--lb_owner_id` and `--lb_replica_count 3`, with an explanation of why a Proxmox VE cluster needs the first two and why `lb_owner_id` must be set before the first volume is created.
-- README: new Lightbits-side prerequisite to enable `EnableTrim` on the cluster (LightOS ships it off, so guest discards are dropped) and a note on thin provisioning; troubleshooting entry for a project-scoped JWT; known limitations for project-scoped tokens and allocation bursts; tested LightOS versions (3.18.4, 3.20.1, 3.21.1) and `libpve-storage-perl` up to 9.1.13 in the compatibility table; JWT path corrected to `/etc/lbcli/lbcli.yaml`.
+- README: new Lightbits-side prerequisite to enable `EnableTrim` on the cluster (LightOS ships it off, so guest discards are dropped) and a note on thin provisioning; troubleshooting entry for a project-scoped JWT; known limitations for project-scoped tokens, allocation bursts and linked clones from templates (full clones only); tested LightOS versions (3.18.4, 3.20.1, 3.21.1) and `libpve-storage-perl` up to 9.1.13 in the compatibility table; JWT path corrected to `/etc/lbcli/lbcli.yaml`.
 
 ### Fixed
 

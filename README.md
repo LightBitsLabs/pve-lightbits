@@ -629,6 +629,7 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 ## Limitations
 
 - **Snapshots are not readable as a block device**: snapshots are native Lightbits snapshots (create, roll back, delete). A snapshot cannot be attached or read on its own, so operations that read a snapshot directly, such as backing up or cloning a VM *from* a snapshot, are not supported; roll back to it, or back up or clone the VM from its current state.
+- **No linked clones from templates**: a VM can be converted to a template, but its disks stay ordinary Lightbits volumes, so clones of it are full clones (`qm clone <template> <newid> --full`, or *Full Clone* mode in the GUI), each an independent copy of the template's disks. Linked clones, which share the template's base volume, are not supported.
 - **TLS verification off by default**: the API connection does not verify the cluster's certificate unless `lb_fingerprint` or `lb_ssl_verify` is set (see "TLS verification for the API connection"), because a LightOS cluster presents a certificate from its own cluster CA. Pinning the fingerprint is a one-line change per storage.
 - **Cluster-level JWT required**: a token scoped to a single project cannot read `/api/v2/cluster`, so the storage shows inactive (see [Storage shows 0 capacity / not active](#storage-shows-0-capacity--not-active)).
 - **Bursts of allocations can hit the storage lock timeout**: Proxmox serializes volume allocation per storage behind a cluster-wide lock. Creating many disks at once (for example an infrastructure-as-code run creating dozens of VMs in parallel) can fail some of them with `got lock timeout`; retry those or limit the parallelism.
@@ -656,6 +657,7 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 On the horizon:
 
 - Volume clones (including file-level recovery from a snapshot)
+- Linked clones from VM templates
 - Multi-tenancy and multi-cluster support
 - Broader Proxmox feature coverage (containers, ISO, vTPM, backups)
 - Debian packaging
