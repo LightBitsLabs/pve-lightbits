@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-10-24
+
+Fixes the installer so that an upgrade reaches every Proxmox daemon that loads the plugin. With earlier installers, `pve-ha-lrm` kept the previous module after an upgrade; after the 1.0.2 token move this made HA restarts after a node failure fail. No plugin code changes since 1.0.2: upgrade by re-running `scripts/install.sh` on each node. Coming from 1.0.1 or earlier, follow the 1.0.2 upgrade order below (README "Upgrading to 1.0.2 (breaking change)").
+
 ### Fixed
 
 - **HA restarts failed after an upgrade until `pve-ha-lrm` was restarted.** `scripts/install.sh` and `scripts/uninstall.sh` restarted only `pvedaemon` and `pvestatd`, but `pve-ha-lrm`, `pve-ha-crm`, `pvescheduler` and `pveproxy` load storage plugins too and kept the previous module in memory. After an upgrade to 1.0.2 and the token move, the HA daemon on an upgraded node still ran the 1.0.1 module, skipped the storage (`missing value for required option 'lb_jwt'`), and every HA restart onto that node failed (found by the long-run test: HA VMs ended in `error` state after a node power cut). Both scripts now restart all of these daemons (`pveproxy` with a reload, the HA services only where they run); running VMs, including HA-managed ones, are not stopped or moved. On a node already upgraded with an earlier installer, run `systemctl restart pvescheduler pve-ha-lrm pve-ha-crm` and `systemctl reload-or-restart pveproxy`.
