@@ -74,8 +74,8 @@ The plugin has two communication paths to the Lightbits cluster:
 | Requirement | Notes |
 |---|---|
 | Proxmox VE **9.x** | Tested on 9.2 up to `libpve-storage-perl` 9.1.13 (storage API 16). Requires the PVE 9 storage API (`-blockdev`). |
-| `nvme-cli` package | Provides the `nvme` command used for connect/disconnect. Ubuntu/Debian: `apt-get install -y nvme-cli`. RHEL/Rocky: `dnf install -y nvme-cli`. |
-| [`discovery-client`](https://github.com/LightBitsLabs/discovery-client) package | Lightbits' NVMe-oF connection manager. The plugin seeds it with this cluster's discovery endpoints instead of running `nvme connect` itself, so it discovers nodes added to the cluster later on its own (removed nodes still need the plugin's own disconnect — see the note below). `scripts/install.sh` attempts to install and start it automatically, best-effort (it warns and continues rather than aborting if that fails, e.g. no internet access — install and start it manually in that case; see [Verify NVMe-oF connectivity](#verify-nvme-of-connectivity-optional-pre-check) to check its status). |
+| `nvme-cli` package | Provides the `nvme` command used for connect/disconnect. `scripts/install.sh` installs it if missing (`apt-get install -y nvme-cli`). |
+| [`discovery-client`](https://github.com/LightBitsLabs/discovery-client) package | Lightbits' NVMe-oF connection manager. The plugin seeds it with this cluster's discovery endpoints instead of running `nvme connect` itself, so it discovers nodes added to the cluster later on its own (removed nodes still need the plugin's own disconnect — see the note below). `scripts/install.sh` attempts to install and start it automatically, best-effort (it warns and continues rather than aborting if that fails, e.g. no internet access — install and start it manually in that case; see [Verify NVMe-oF connectivity](#verify-nvme-of-connectivity-optional-pre-check) to check its status). The package comes from Lightbits' apt repository under its Ubuntu path (`ubuntu jammy` by default), because that is where Lightbits publishes it; it is a static binary that runs on Proxmox VE (Debian) as is, so this is not an Ubuntu requirement. To use another release of that repository, set `LB_DSC_REPO_DISTRO` / `LB_DSC_REPO_CODENAME` when running the installer (see `install.sh --help`). |
 | `nvme_tcp` kernel module | Loaded automatically by nvme-cli on modern Proxmox kernels. |
 | Perl modules | `LWP::Protocol::https` and `JSON` - both included in stock Proxmox. |
 | Network access | TCP reachability to the Lightbits host on **port 443** (REST), **port 4420** (NVMe-oF I/O), and **port 8009** (NVMe-oF discovery). |
@@ -553,11 +553,7 @@ If it is missing, re-run `scripts/install.sh` (it restarts the Proxmox daemons t
 `nvme-cli` is not installed or was never initialised. Install it:
 
 ```bash
-# Ubuntu/Debian (including Proxmox VE)
 apt-get install -y nvme-cli
-
-# RHEL/Rocky/AlmaLinux
-dnf install -y nvme-cli
 
 cat /etc/nvme/hostnqn   # should print a nqn.* string
 ```

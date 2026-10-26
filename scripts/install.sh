@@ -41,6 +41,15 @@ Requirements:
   - Proxmox VE 9.x (verified by the presence of $STORAGE_PM)
   - root privileges
 
+Environment:
+  LB_DSC_REPO_DISTRO, LB_DSC_REPO_CODENAME
+     Release of Lightbits' discovery-client apt repository to install from
+     (default: ubuntu / jammy). Lightbits publishes the package under the
+     Ubuntu repo path; it is a static binary that runs on Proxmox VE (Debian)
+     as is, so the default needs no change. Only used when discovery-client is
+     not installed yet. Example:
+       LB_DSC_REPO_CODENAME=noble ./install.sh
+
 Exit status:
   0  plugin installed (check the health output for ACTION REQUIRED items)
   1  not run as root, or this is not a Proxmox VE host
@@ -127,8 +136,17 @@ if ! command -v discovery-client &>/dev/null; then
             # codename). Proxmox is a Debian derivative, but the package itself is a generic
             # alien-converted static binary (only libc6 dependency) identical across every
             # published ubuntu codename, so this works regardless of the host's actual distro.
-            distro=ubuntu
-            codename=jammy
+            # LB_DSC_REPO_DISTRO / LB_DSC_REPO_CODENAME override the release (see --help); set but
+            # empty is rejected by the check below rather than falling back to the default.
+            # An unknown release makes config.deb.txt return 404 (curl -f fails) and an
+            # empty one makes apt-get install fail, both ending in the warning below.
+            distro=${LB_DSC_REPO_DISTRO-ubuntu}
+            codename=${LB_DSC_REPO_CODENAME-jammy}
+            [[ $distro =~ ^[a-z0-9-]+$ && $codename =~ ^[a-z0-9-]+$ ]] || {
+                echo "invalid LB_DSC_REPO_DISTRO/LB_DSC_REPO_CODENAME: '$distro' / '$codename'" >&2
+                exit 1
+            }
+            echo "discovery-client repo: $distro $codename"
             curl -1sLf "https://dl.lightbitslabs.com/public/discovery-client/config.deb.txt?distro=${distro}&codename=${codename}" \
                 > "$source_tmp"
             chmod 0644 "$key_tmp" "$source_tmp"
