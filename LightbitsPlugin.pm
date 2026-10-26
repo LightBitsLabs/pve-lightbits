@@ -1932,28 +1932,42 @@ sub volume_snapshot_rollback {
     my $vol_uuid  = _resolve_existing_uuid($scfg, $volname);
 
     # Ownership guard before the rollback PUT.
-    _owned_existing_volume($scfg, $project, $vol_uuid, 'roll back', $volname);
+    my $vol = _owned_existing_volume($scfg, $project, $vol_uuid, 'roll back', $volname);
 
     my $snap_uuid = _snap_uuid($scfg, $project, $volname, $snap);
+
+    # The PUT returns an empty body (no task to follow) and LightOS applies the
+    # rollback asynchronously, so the volume is usually still 'Available' on the
+    # first poll, before the rollback has run. LightOS bumps the volume's ETag
+    # when it accepts the rollback (the volume then shows 'Rollback' and returns
+    # to 'Available' with the new ETag; verified on 3.21.1), so completion is
+    # 'Available' after the ETag moved or after 'Rollback' was seen. Without an
+    # ETag to compare we fall back to the first 'Available'.
+    my $etag_before = $vol->{ETag};
+    $etag_before = undef if defined($etag_before) && $etag_before eq '';
 
     _api($scfg, 'PUT', "/api/v2/projects/$project/volumes/$vol_uuid/rollback",
         { srcSnapshotUUID => $snap_uuid });
 
-    # Wait for the volume to return to Available, failing on a terminal state or a
-    # timeout rather than assuming success.
-    my $state = '';
+    # Wait for the rollback to finish, failing on a terminal state or a timeout
+    # rather than assuming success.
+    my $state   = '';
+    my $started = !defined($etag_before);
     for my $attempt (1..60) {
         my $v  = _get_existing($scfg, "/api/v2/volumes/$vol_uuid?projectName=$project",
             "Volume $vol_uuid");
         $state = $v->{state} // '';
-        last if $state eq 'Available';
+        $started ||= $state eq 'Rollback'
+            || (defined($v->{ETag}) && $v->{ETag} ne $etag_before);
+        last if $started && $state eq 'Available';
         die "Lightbits volume $vol_uuid rollback to '$snap' failed (state '$state')\n"
             if $state =~ /^(Failed|Deleting|Deleted)$/i;
         sleep 2;
     }
     die "Lightbits volume $vol_uuid rollback to '$snap' did not complete "
-        . "(last state '$state')\n"
-        if $state ne 'Available';
+        . "(last state '$state'"
+        . ($started ? '' : ', rollback not yet applied by the cluster') . ")\n"
+        unless $started && $state eq 'Available';
 
     _rescan_controller($storeid, _link_name($volname));
 
