@@ -136,11 +136,12 @@ if ! command -v discovery-client &>/dev/null; then
             # codename). Proxmox is a Debian derivative, but the package itself is a generic
             # alien-converted static binary (only libc6 dependency) identical across every
             # published ubuntu codename, so this works regardless of the host's actual distro.
-            # LB_DSC_REPO_DISTRO / LB_DSC_REPO_CODENAME override the release (see --help).
+            # LB_DSC_REPO_DISTRO / LB_DSC_REPO_CODENAME override the release (see --help); set but
+            # empty is rejected by the check below rather than falling back to the default.
             # An unknown release makes config.deb.txt return 404 (curl -f fails) and an
             # empty one makes apt-get install fail, both ending in the warning below.
-            distro=${LB_DSC_REPO_DISTRO:-ubuntu}
-            codename=${LB_DSC_REPO_CODENAME:-jammy}
+            distro=${LB_DSC_REPO_DISTRO-ubuntu}
+            codename=${LB_DSC_REPO_CODENAME-jammy}
             [[ $distro =~ ^[a-z0-9-]+$ && $codename =~ ^[a-z0-9-]+$ ]] || {
                 echo "invalid LB_DSC_REPO_DISTRO/LB_DSC_REPO_CODENAME: '$distro' / '$codename'" >&2
                 exit 1
