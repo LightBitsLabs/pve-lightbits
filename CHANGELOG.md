@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-10-26
+
+Hardens snapshot rollback: the plugin now waits until LightOS has applied the rollback before returning, instead of relying on the volume state alone. No configuration or storage changes: upgrade by re-running `scripts/install.sh` on each node. Coming from 1.0.1 or earlier, follow the 1.0.2 upgrade order (README "Upgrading to 1.0.2 (breaking change)").
+
 ### Fixed
 
 - **Snapshot rollback now waits for the rollback itself to finish** ([#64](https://github.com/LightBitsLabs/pve-lightbits/issues/64)). LightOS applies a rollback asynchronously, and the plugin treated the volume's first `Available` state as completion, a state the volume is already in before the request. In rare cases, on a busy or recovering cluster, the call could therefore return before the rollback was applied. The plugin now waits until LightOS has accepted the rollback (the volume's `ETag` changes or it enters the `Rollback` state) and the volume is `Available` again, with the existing timeout and failure handling. Not observed causing a problem in testing; LightOS normally completes a rollback within milliseconds. Unit test `t/volume_snapshot_rollback.t` extended.
