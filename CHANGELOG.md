@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Installer: the discovery-client repository release can be overridden** ([#67](https://github.com/LightBitsLabs/pve-lightbits/issues/67)). `scripts/install.sh` installs `discovery-client` from Lightbits' apt repository under its Ubuntu path (`ubuntu jammy`), because that is where Lightbits publishes the package; it is a static binary that runs on Proxmox VE (Debian) as is. The default is unchanged. `LB_DSC_REPO_DISTRO` / `LB_DSC_REPO_CODENAME` now select another release of that repository (values are checked; an unknown release ends in the installer's existing warning). README explains the choice, and the RHEL/Rocky `dnf` instructions, which do not apply to Proxmox VE, are removed.
+
 ## [1.0.4] - 2026-10-26
 
 Hardens snapshot rollback: the plugin now waits until LightOS has applied the rollback before returning, instead of relying on the volume state alone. No configuration or storage changes: upgrade by re-running `scripts/install.sh` on each node. Coming from 1.0.1 or earlier, follow the 1.0.2 upgrade order (README "Upgrading to 1.0.2 (breaking change)").
