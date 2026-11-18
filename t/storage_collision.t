@@ -51,7 +51,7 @@ sub add_err {
 my $err = add_err('lb-b', lb(), lb_jwt => 'tok');
 like($err, qr/'lb-b' would share its volumes with storage 'lb-a'/, 'same endpoint, project and owner: refused');
 like($err, qr/project 'default' with owner id 'pve1'/, 'the error names the project and owner id');
-like($err, qr/different lb_owner_id or lb_project/, 'and says how to fix it');
+like($err, qr/Use a different lb_owner_id or lb_project for 'lb-b'/, 'and says how to fix it, on the new entry');
 ok(!-e "$tmp/priv/lb-b.pw", 'a refused entry leaves no token file behind');
 is(scalar @asked, 0, 'a shared endpoint needs no cluster lookup');
 
@@ -150,6 +150,9 @@ ok($class->activate_storage('lb-b', $entries{'lb-b'}), 'activate_storage still s
 is(scalar @warned, 1, 'one warning');
 like($warned[0], qr/^WARNING: Lightbits storage 'lb-b' shares its volumes with storage 'lb-a'/, 'naming both entries');
 is(scalar @asked, 0, 'without any API call');
+like($warned[0], qr/Disable or remove the entry that is not needed/, 'advising to drop one entry');
+like($warned[0], qr/Do not change lb_owner_id or lb_project on an entry that already has disks/,
+    'and not to change the owner id or project of an entry with disks');
 $class->activate_storage('lb-b', $entries{'lb-b'});
 is(scalar @warned, 1, 'rate-limited: not repeated at once');
 {

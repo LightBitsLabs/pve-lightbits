@@ -252,19 +252,22 @@ sub _colliding_entry {
     return undef;
 }
 
-sub _collision_text {
-    my ($storeid, $scfg, $other) = @_;
-    return "Lightbits storage '$storeid' would share its volumes with storage '$other': "
-        . "both use project '" . _project($scfg) . "' with owner id '" . _owner_id($scfg)
-        . "' on the same Lightbits cluster, so each would list and could free the other's "
-        . "disks. Give one of them a different lb_owner_id or lb_project.\n";
+# What the two entries have in common, for both messages.
+sub _collision_what {
+    my ($scfg) = @_;
+    return "both use project '" . _project($scfg) . "' with owner id '" . _owner_id($scfg)
+        . "' on the same Lightbits cluster, so each lists and can free the other's disks";
 }
 
+# Refusing a change: the fix is on the entry being added or changed, which is
+# safe to say because the change has not happened.
 sub _refuse_colliding_entry {
     my ($storeid, $scfg) = @_;
     my $other = _colliding_entry($storeid, $scfg, 1);
-    die _collision_text($storeid, $scfg, $other) if defined $other;
-    return;
+    return unless defined $other;
+    die "Lightbits storage '$storeid' would share its volumes with storage '$other': "
+        . _collision_what($scfg) . ". Use a different lb_owner_id or lb_project for "
+        . "'$storeid'.\n";
 }
 
 # For a pair that already exists (created by an earlier release or by editing
@@ -275,8 +278,12 @@ sub _warn_colliding_entry {
     my $other = eval { _colliding_entry($storeid, $scfg, 0) };
     return unless defined $other;
     return unless _in_pve_task() || _failover_should_warn("collision:$storeid:$other");
-    (my $text = _collision_text($storeid, $scfg, $other)) =~ s/would share/shares/;
-    warn "WARNING: $text";
+    # Not "change lb_owner_id or lb_project" here: on an entry that already
+    # has disks that hides them (they are selected by exactly those values).
+    warn "WARNING: Lightbits storage '$storeid' shares its volumes with storage '$other': "
+        . _collision_what($scfg) . ". Disable or remove the entry that is not needed. Do "
+        . "not change lb_owner_id or lb_project on an entry that already has disks: that "
+        . "hides them (see README, \"More than one storage entry on the same cluster\").\n";
     return;
 }
 
