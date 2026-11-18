@@ -317,7 +317,7 @@ pvesm add lightbits lb-compressed ... --lb_owner_id pve-cluster1-compressed --lb
 - It is a projection that assumes future data compresses like the data already stored. With little data on the cluster it can move a lot.
 - It is a figure for the whole cluster, so every storage entry on that cluster shows the same moving total, including entries without `lb_compression`.
 
-The fields behind it are `estimatedLogicalStorage` and `estimatedFreeLogicalStorage` in the [Lightbits REST API reference](https://documentation.lightbitslabs.com/api-service-durosapiv2.proto/ref); the calculation is described in the Lightbits [Metrics Families](https://documentation.lightbitslabs.com/lightbits-metrics/metrics-families) documentation.
+Lightbits documents the two cluster fields behind these numbers, `estimatedLogicalStorage` ("estimate of total available logical storage based on current compression ratio") and `estimatedFreeLogicalStorage`, under the cluster statistics of [Retrieve cluster information](https://documentation.lightbitslabs.com/api-service-durosapiv2.proto#durosapi-getcluster) in the Lightbits REST API reference. The [Metrics Families](https://documentation.lightbitslabs.com/lightbits-metrics/metrics-families) page gives the same calculation per node (effective physical storage x compression ratio).
 
 To check a volume's setting on the cluster, look at its `Compression` field (`lbcli get volume --project-name <project> --uuid <uuid>`).
 
