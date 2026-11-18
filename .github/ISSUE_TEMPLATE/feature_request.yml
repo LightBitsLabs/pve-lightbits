@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an improvement or new capability
+labels:
+- enhancement
+body:
+- type: textarea
+  id: problem
+  attributes:
+    label: Problem
+    description: What problem does this feature solve? Who is affected and in what scenario?
+  validations:
+    required: true
+- type: textarea
+  id: solution
+  attributes:
+    label: Proposed solution
+    description: How should it work? Include any relevant config parameters, CLI changes, or behaviour changes.
+  validations:
+    required: true
+- type: textarea
+  id: alternatives
+  attributes:
+    label: Alternatives considered
+    description: Any other approaches you evaluated and why you ruled them out.
+- type: textarea
+  id: context
+  attributes:
+    label: Additional context
+    description: Cluster topology, scale, or other constraints that are relevant to the design.
