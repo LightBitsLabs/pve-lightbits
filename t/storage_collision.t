@@ -92,6 +92,77 @@ is(add_err('lb-b', lb(lb_api_host => 'lb.example.com:443')), '', 'other cluster 
     is_deeply(\@tokens, ['tok-b', 'tok-a'], 'each cluster is asked with its own entry\'s token');
 }
 
+# ── a token deleted by the request is not used for the lookup ─────────────────
+{
+    my @tokens;
+    no warnings 'redefine';
+    local *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
+        die "no token\n" unless defined $_[0]{lb_jwt};
+        push @tokens, $_[0]{lb_jwt}; return { UUID => 'u' };
+    };
+    %entries = ('lb-a' => lb(), 'lb-b' => lb(lb_project => 'other'));
+    P('_write_jwt', 'lb-b', 'stored-b');
+    eval { $class->on_update_hook_full('lb-b', $entries{'lb-b'},
+        { lb_api_host => 'new-host:443', lb_project => 'default' }, [], { lb_jwt => undef }) };
+    is($@, '', 'update that deletes the token and moves the endpoint: no lookup possible, accepted');
+    is_deeply(\@tokens, [], 'the stored token is not sent to the new endpoint');
+    is(P('_read_jwt', 'lb-b'), undef, 'and the token is deleted as asked');
+}
+
+# ── IPv6 endpoints are compared in canonical form ─────────────────────────────
+%uuid_of = ();
+%entries = ('lb-a' => lb(lb_api_host => '[fd00::1]:443'));
+like(add_err('lb-b', lb(lb_api_host => '[FD00:0:0:0:0:0:0:1]')), qr/would share/, 'two spellings of one IPv6 endpoint: refused without a lookup');
+is(scalar @asked, 0, 'no cluster lookup needed');
+is(add_err('lb-b', lb(lb_api_host => '[fd00::1]:8443')), '', 'same IPv6 address, another port: a different endpoint');
+is(add_err('lb-b', lb(lb_api_host => '[fd00::2]:443')), '', 'another IPv6 address: a different endpoint');
+
+# ── cluster lookup: failures, odd answers, and Proxmox's lock timeout ─────────
+{
+    no warnings 'redefine';
+    %entries = ('lb-a' => lb());
+    local *PVE::Storage::Custom::LightbitsPlugin::_api = sub { return [] };
+    is(add_err('lb-b', lb(lb_api_host => 'elsewhere:443')), '', 'a non-object answer counts as an unknown cluster, not a crash');
+    local *PVE::Storage::Custom::LightbitsPlugin::_api = sub { die "got lock timeout - aborting command\n" };
+    like(add_err('lb-b', lb(lb_api_host => 'elsewhere:443'), lb_jwt => 't'), qr/got lock timeout/, 'Proxmox aborting the command is passed on, so nothing is saved');
+    ok(!-e "$tmp/priv/lb-b.pw" || P('_read_jwt', 'lb-b') ne 't', 'and no token is stored');
+}
+
+# ── endpoint matches are found before any lookup; lookups share one budget ────
+%uuid_of = ('z:443' => 'uuid-z', '10.0.0.1:443' => 'uuid-1');
+%entries = ('lb-a' => lb(lb_api_host => 'unreachable-a:443'), 'lb-z' => lb(lb_api_host => 'z:443'));
+like(add_err('lb-new', lb(lb_api_host => 'z:443')), qr/with storage 'lb-z'/, 'an endpoint match on a later entry is found');
+is(scalar @asked, 0, 'before any cluster lookup');
+{
+    no warnings 'once';
+    local $PVE::Storage::Custom::LightbitsPlugin::UUID_PROBE_BUDGET = 0;
+    is(add_err('lb-new', lb(lb_api_host => 'other-name-for-z:443')), '', 'an exhausted lookup budget ends the lookups');
+    ok(scalar @asked <= 1, 'without probing the other entries');
+}
+
+# ── a default owner id is the node name, resolved on the nodes both share ─────
+{
+    no warnings 'once';
+    local $PVE::Storage::Custom::LightbitsPlugin::CLUSTER_NODES = sub { qw(pve1 pve2) };
+    %uuid_of = ();
+    %entries = ('lb-a' => lb(nodes => { pve2 => 1 }, lb_owner_id => 'pve2'));
+    my $e = add_err('lb-b', lb(nodes => { pve2 => 1 }));
+    like($e, qr/would share/, 'default owner on pve2 vs explicit "pve2", added from pve1: refused');
+    like($e, qr/owner id 'pve2'/, 'naming the owner id they share there');
+    %entries = ('lb-a' => lb(nodes => { pve2 => 1 }, lb_owner_id => 'pve1'));
+    is(add_err('lb-b', lb(nodes => { pve2 => 1 })), '', 'explicit "pve1" vs default owner on pve2 only: no collision there');
+    %entries = ('lb-a' => lb(lb_owner_id => 'pve2'));
+    like(add_err('lb-b', lb()), qr/owner id 'pve2'/, 'unrestricted: explicit owner equal to another node\'s name collides on that node');
+    %entries = ('lb-a' => lb(lb_owner_id => 'somewhere-else'));
+    is(add_err('lb-b', lb()), '', 'explicit owner that is no node name vs default: accepted');
+    # A pair that collides only on another node is that node's to warn about.
+    %entries = ('lb-a' => lb(lb_owner_id => 'pve2'), 'lb-b' => lb());
+    my @w; local $SIG{__WARN__} = sub { push @w, @_ };
+    { no warnings 'once'; local $PVE::Storage::Custom::LightbitsPlugin::SYMLINK_DIR = "$tmp/dev2";
+      $class->activate_storage('lb-b', $entries{'lb-b'}); }
+    is(scalar @w, 0, 'no warning on a node where the pair does not collide');
+}
+
 # ── entries that are not in the way ───────────────────────────────────────────
 %uuid_of = ();
 %entries = ('lb-a' => lb(disable => 1));
