@@ -136,6 +136,7 @@ is(scalar @asked, 0, 'before any cluster lookup');
 {
     no warnings 'once';
     local $PVE::Storage::Custom::LightbitsPlugin::UUID_PROBE_BUDGET = 0;
+    my @w; local $SIG{__WARN__} = sub { push @w, @_ };
     is(add_err('lb-new', lb(lb_api_host => 'other-name-for-z:443')), '', 'an exhausted lookup budget ends the lookups');
     is(scalar @asked, 0, 'without any request, the candidate\'s included');
 }
@@ -192,7 +193,7 @@ is(scalar @asked, 0, 'before any cluster lookup');
     my @w; local $SIG{__WARN__} = sub { push @w, @_ };
     my $e = add_err('lb-new', lb(lb_api_host => 'new:443'));
     is($e, '', 'budget used up by a slow peer: the change is not blocked');
-    like($w[0] // '', qr/could not check within 8s whether it shares a cluster with 'lb-z'/, 'but the unchecked entry is named in a warning');
+    like($w[0] // '', qr/could not check within 8s whether it shares a cluster with 'lb-a', 'lb-z'/, 'but the slow entry and the unchecked one are named in a warning');
 }
 
 # ── node name vs a hostname that carries a domain ─────────────────────────────
@@ -205,6 +206,43 @@ is(scalar @asked, 0, 'before any cluster lookup');
     like(add_err('lb-b', lb(nodes => { pve1 => 1 })), qr/owner id 'pve1\.example\.com'/, 'default owner is the full hostname on the node named by its short name');
     %entries = ('lb-a' => lb(nodes => { pve1 => 1 }, lb_owner_id => 'pve1'));
     is(add_err('lb-b', lb(nodes => { pve1 => 1 })), '', 'explicit short name vs a default owner that is the FQDN: different owners');
+}
+
+# ── another node's default owner may be its name plus a domain ────────────────
+{
+    no warnings 'once';
+    local $PVE::Storage::Custom::LightbitsPlugin::CLUSTER_NODES = sub { qw(pve1 pve2) };
+    %uuid_of = ();
+    %entries = ('lb-a' => lb(nodes => { pve2 => 1 }, lb_owner_id => 'pve2.example.com'));
+    like(add_err('lb-b', lb(nodes => { pve2 => 1 })), qr/owner id 'pve2\.example\.com'/, 'explicit owner = remote node name with a domain vs default owner there: refused');
+    %entries = ('lb-a' => lb(nodes => { pve2 => 1 }, lb_owner_id => 'pve22'));
+    is(add_err('lb-b', lb(nodes => { pve2 => 1 })), '', 'an owner that merely starts with the node name is not a match');
+}
+
+# ── a lookup cut short by the deadline is reported, wherever it happens ───────
+{
+    no warnings qw(redefine once);
+    my $now = 1000; my %cost;
+    local $PVE::Storage::Custom::LightbitsPlugin::PROBE_CLOCK = sub { $now };
+    local *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
+        my ($scfg) = @_; my $h = $scfg->{lb_api_host};
+        $now += $cost{$h} // 0;
+        die "500 timeout\n" if $h =~ /^slow/;
+        return { UUID => "uuid-of-$h" };
+    };
+    my @w; local $SIG{__WARN__} = sub { push @w, @_ };
+    %entries = ('lb-a' => lb(lb_api_host => 'a:443'), 'lb-c' => lb(lb_api_host => 'c:443'));
+    %cost = ('slow-new:443' => 20);
+    is(add_err('lb-new', lb(lb_api_host => 'slow-new:443,new2:443')), '', 'candidate lookup cut short: accepted');
+    like($w[0] // '', qr/shares a cluster with 'lb-a', 'lb-c'/, 'every entry left unchecked is named');
+    @w = (); $now = 1000; %cost = ('slow-a:443' => 20);
+    %entries = ('lb-a' => lb(lb_api_host => 'slow-a:443,a2:443'), 'lb-c' => lb(lb_api_host => 'c:443'));
+    is(add_err('lb-new', lb(lb_api_host => 'new:443')), '', 'a peer lookup cut short between its endpoints: accepted');
+    like($w[0] // '', qr/shares a cluster with 'lb-a', 'lb-c'/, 'that peer and the ones after it are named');
+    @w = (); $now = 1000; %cost = ();
+    %entries = ('lb-a' => lb(lb_api_host => 'slow-a:443'));
+    is(add_err('lb-new', lb(lb_api_host => 'new:443')), '', 'an ordinary lookup failure in time: accepted');
+    is(scalar @w, 0, 'with no warning');
 }
 
 # ── activation warning looks only at what collides on this node ───────────────

@@ -268,8 +268,16 @@ sub _common_owner {
         # Both default to the node's name: they agree on every node they share.
         return $default_on->((grep { $_ eq $here } @nodes) ? $here : $nodes[0]);
     }
+    # One explicit owner against a default one. On this node the default is
+    # known exactly. Another node's kernel hostname cannot be read from here,
+    # and it may carry a domain, so an explicit owner equal to that node's
+    # name, or to that name followed by a domain, counts as a match there.
     my $explicit = $ea // $eb;
-    return (grep { $default_on->($_) eq $explicit } @nodes) ? $explicit : undef;
+    for my $n (@nodes) {
+        return $explicit if $n eq $here ? $default_on->($n) eq $explicit
+                                        : ($explicit eq $n || index($explicit, "$n.") == 0);
+    }
+    return undef;
 }
 
 # This node's name as Proxmox knows it: the hostname without its domain.
@@ -294,8 +302,9 @@ our $UUID_PROBE_BUDGET  = 8;
 our $UUID_PROBE_TIMEOUT = 3;
 our $PROBE_CLOCK       = sub { time() };   # overridable in tests
 
-# UUID of the cluster behind an entry, or undef when it cannot be read before
-# $deadline (an unreachable endpoint, no token, an unexpected answer). The
+# (UUID, expired): the UUID of the cluster behind an entry, or undef when it
+# cannot be read (an unreachable endpoint, no token, an unexpected answer),
+# and whether the lookup was cut short by $deadline rather than completed. The
 # endpoints are tried one request at a time, each checked against the
 # deadline, rather than through _api's own failover, which would give every
 # endpoint a full timeout. Proxmox aborting the command with its lock timeout
@@ -305,15 +314,17 @@ sub _cluster_uuid {
     my ($scfg, $deadline) = @_;
     for my $ep (_api_endpoints($scfg->{lb_api_host})) {
         my $left = $deadline - $PROBE_CLOCK->();
-        return undef if $left <= 0;
+        return (undef, 1) if $left <= 0;
         my $timeout = $left < $UUID_PROBE_TIMEOUT ? $left : $UUID_PROBE_TIMEOUT;
         my $data = eval {
             _api({ %$scfg, lb_api_host => $ep }, 'GET', '/api/v2/cluster', undef, timeout => $timeout);
         };
         die $@ if $@ && $@ =~ /^got (?:lock (?:request )?)?timeout/;
-        return $data->{UUID} if ref $data eq 'HASH' && $data->{UUID} && !ref $data->{UUID};
+        return ($data->{UUID}, 0) if ref $data eq 'HASH' && $data->{UUID} && !ref $data->{UUID};
     }
-    return undef;
+    # Every endpoint was tried: an ordinary failure, unless the time ran out
+    # during the last request.
+    return (undef, $PROBE_CLOCK->() >= $deadline ? 1 : 0);
 }
 
 # The first other enabled lightbits entry that would share volumes with $scfg
@@ -342,14 +353,19 @@ sub _colliding_entry {
     return unless $ask_cluster && @probe;
 
     my $deadline = $PROBE_CLOCK->() + $UUID_PROBE_BUDGET;
-    my $uuid = _cluster_uuid($scfg, $deadline);
-    return unless defined $uuid;
     my @unchecked;
-    for my $cand (@probe) {
+    my ($uuid, $expired) = _cluster_uuid($scfg, $deadline);
+    if (!defined $uuid) {
+        # An ordinary failure leaves the endpoint comparison as the answer; a
+        # lookup cut short leaves every remaining entry unchecked.
+        @unchecked = map { $_->[0] } @probe if $expired;
+        @probe = ();
+    }
+    while (my $cand = shift @probe) {
         my ($other, $owner) = @$cand;
-        if ($PROBE_CLOCK->() >= $deadline) { push @unchecked, $other; next; }
-        my $other_uuid = _cluster_uuid(_with_jwt($entries->{$other}, $other), $deadline);
+        my ($other_uuid, $cut) = _cluster_uuid(_with_jwt($entries->{$other}, $other), $deadline);
         return ($other, $owner) if defined $other_uuid && $other_uuid eq $uuid;
+        if ($cut) { push @unchecked, $other, map { $_->[0] } @probe; last; }
     }
     # Not refused: one slow or dead cluster must not block every storage
     # change. But say that the check did not get to these entries.
