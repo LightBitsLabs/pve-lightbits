@@ -1200,6 +1200,13 @@ sub properties {
             maximum     => 3,
             default     => 1,
         },
+        lb_compression => {
+            description => "Create each new volume with Lightbits compression enabled. "
+                . "Applies to disks created after it is set; existing volumes keep "
+                . "their setting. Unset leaves the cluster default (compression off).",
+            type        => 'boolean',
+            default     => 0,
+        },
         lb_fingerprint => {
             description => "SHA-256 fingerprint of the Lightbits API server's TLS "
                 . "certificate, colon-separated hex as printed by "
@@ -1247,6 +1254,7 @@ sub options {
         lb_subsys_nqn => { fixed => 1, optional => 1 },
         lb_owner_id   => { optional => 1 },
         lb_replica_count => { optional => 1 },
+        lb_compression => { optional => 1 },
         lb_fingerprint => { optional => 1 },
         lb_ssl_verify => { optional => 1 },
         lb_ca_file    => { optional => 1 },
@@ -1688,6 +1696,14 @@ sub alloc_image {
         acl          => { values => [$host_nqn] },
         labels       => \@labels,
     };
+    # The LightOS API takes compression as the string "true"/"false". Only sent
+    # when lb_compression is set, so a storage without it keeps the exact
+    # request (and cluster default) of earlier releases. The value is matched
+    # against the "on" spellings Proxmox accepts for a boolean rather than
+    # tested for Perl truth, so a spelling such as "off" or "false" that
+    # reaches here unnormalised can never turn compression on.
+    $body->{compression} = $scfg->{lb_compression} =~ /^(?:1|on|yes|true)$/i ? 'true' : 'false'
+        if defined $scfg->{lb_compression};
 
     my $result = _api($scfg, 'POST', '/api/v2/volumes', $body);
     my $uuid   = $result->{UUID} or die "Lightbits volume creation returned no UUID\n";

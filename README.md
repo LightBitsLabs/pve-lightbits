@@ -289,6 +289,38 @@ pvesm add lightbits lb-storage \
 
 `--lb_replica_count` sets how many copies of each volume the cluster keeps: `3` on a cluster of three or more nodes, `2` or `3` on a multi-node cluster in general. It defaults to `1`, and the value must be supported by the cluster — a single-node cluster only accepts `1`.
 
+#### Compression
+
+`--lb_compression 1` creates every new disk on the storage entry with Lightbits compression enabled. It is off by default; without it, volumes get the cluster's default, which is compression off. Set it when adding the storage or at any time later:
+
+```bash
+pvesm set lb-storage --lb_compression 1        # enable for new disks
+pvesm set lb-storage --lb_compression 0        # disable for new disks
+pvesm set lb-storage --delete lb_compression   # back to the cluster default
+```
+
+- **It is a setting of the storage entry, not of a single disk.** Every disk the plugin creates on that entry afterwards follows it: VM disks, cloud-init drives, full clones and restores onto the storage. No restart is needed; the next disk created uses the new value.
+- **Existing disks keep their setting.** `lb_compression` only affects disks created after it is set; the plugin never changes volumes that already exist. LightOS itself can change the setting of an existing volume, on the cluster and outside Proxmox (`lbcli update volume --project-name <project> --uuid <uuid> --compression true`, see [lbcli update volume](https://documentation.lightbitslabs.com/lightbits-cli-reference-guide/lbcli-update-volume)).
+- **To mix compressed and uncompressed disks**, define two storage entries that point at the same Lightbits cluster, one with `--lb_compression 1` and one without, and choose between them per disk (CLI or the storage dropdown in the web UI). The Proxmox storage API has no per-disk option for this. The two entries need different owner ids or different projects; see [More than one storage entry on the same cluster](#more-than-one-storage-entry-on-the-same-cluster).
+
+```bash
+pvesm add lightbits lb-fast       ... --lb_owner_id pve-cluster1-fast
+pvesm add lightbits lb-compressed ... --lb_owner_id pve-cluster1-compressed --lb_compression 1
+```
+
+`pvesm` accepts `1`/`0` and the usual spellings (`on`/`off`, `yes`/`no`, `true`/`false`) and stores `1` or `0`. When editing `/etc/pve/storage.cfg` by hand, write `lb_compression 1` or `lb_compression 0`, and remove the whole line to go back to the cluster default: Proxmox rejects any other value there with a parse warning and ignores the line, which leaves compression off.
+
+**Set it only once every node of the Proxmox VE cluster runs a plugin release that knows the option.** The storage definition is shared by all nodes; a node still on 1.0.4 or earlier does not know `lb_compression`: it prints `unable to parse value of 'lb_compression': unknown property type` on every storage command, creates its disks without compression, and removes the option from `storage.cfg` the next time any storage setting is changed from that node. The same applies after downgrading the plugin: the storage keeps working, and the option has to be set again after returning to a release that knows it.
+
+**The storage size Proxmox shows changes once compressed data is stored.** The total and free space in `pvesm status` and in the web UI are what the Lightbits cluster reports: not its raw capacity, but an estimate of how much data it can hold, calculated as the usable physical capacity multiplied by the compression ratio of the data stored so far. As compressed data is written the total grows, and it shrinks again when that data is deleted or less compressible data arrives. For example, a cluster shown as 2.49 TiB while empty was shown as 3.87 TiB after 2 GiB of well-compressible data was written to a compressed disk. Keep in mind:
+
+- It is a projection that assumes future data compresses like the data already stored. With little data on the cluster it can move a lot.
+- It is a figure for the whole cluster, so every storage entry on that cluster shows the same moving total, including entries without `lb_compression`.
+
+Lightbits documents the two cluster fields behind these numbers, `estimatedLogicalStorage` ("estimate of total available logical storage based on current compression ratio") and `estimatedFreeLogicalStorage`, under the cluster statistics of [Retrieve cluster information](https://documentation.lightbitslabs.com/api-service-durosapiv2.proto#durosapi-getcluster) in the Lightbits REST API reference. The [Metrics Families](https://documentation.lightbitslabs.com/lightbits-metrics/metrics-families) page gives the same calculation per node (effective physical storage x compression ratio).
+
+To check a volume's setting on the cluster, look at its `Compression` field (`lbcli get volume --project-name <project> --uuid <uuid>`).
+
 #### More than one storage entry on the same cluster
 
 A storage entry's disks are selected by Lightbits project and owner id (`lb_owner_id`, by default the node's hostname), not by the entry's name. Two entries that point at the same cluster with the same project and the same owner id would therefore both list, and act on, the same disks: Proxmox would see each disk twice, a `qm rescan` would add the second copy to the VM as an "unused disk", and removing that unused disk would delete the volume the VM is using.
@@ -682,7 +714,7 @@ If the journal shows `GET /api/v2/cluster failed ... 403`, the JWT is scoped to 
 
 1. **`alloc_image`** - Called when Proxmox allocates a new disk.
    - Reads the host NQN from `/etc/nvme/hostnqn`.
-   - POSTs to `/api/v2/volumes` with the volume name (`vm-<vmid>-<vmgenid>-disk-<n>`), size (bytes, 4096-aligned), replica count, project, and the host NQN in the ACL so only this host can access it.
+   - POSTs to `/api/v2/volumes` with the volume name (`vm-<vmid>-<vmgenid>-disk-<n>`), size (bytes, 4096-aligned), replica count, project, the host NQN in the ACL so only this host can access it, and, when `lb_compression` is set on the storage, the compression setting.
    - Polls until the volume reaches `Available` state.
    - Returns the volid `lb-storage:vm-<vmid>-<uuid>` (the embedded vmid lets Proxmox identify the owning guest), which is stored in the VM config.
    - **Cloud-init drive:** qemu-server recognises a VM's cloud-init drive only by the volume name `vm-<vmid>-cloudinit` and asks the storage for exactly that name, so for this one volume the plugin honours it: the volid is `lb-storage:vm-<vmid>-cloudinit`, the LightOS volume is named `vm-<vmid>-<vmgenid>-cloudinit` and carries an extra `pveRole=cloudinit` label, through which the plugin finds its UUID again (a VM has at most one). Proxmox writes the generated cloud-init ISO straight into the Lightbits volume, so `qm clone --full --storage lb-storage`, `qmrestore --storage lb-storage` and HA failover all work with the cloud-init drive on Lightbits.
@@ -739,6 +771,7 @@ Linux numbers NVMe namespaces sequentially (`nvme0n1`, `nvme0n2`, ...) regardles
 - Per-VM ownership labels and node-aware filtering (multi-hypervisor safety)
 - NVMe-oF TCP transport
 - Storage capacity reporting
+- Optional compression per storage entry
 
 ### Beyond 1.0
 
