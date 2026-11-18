@@ -12,6 +12,7 @@ use LWP::UserAgent;
 use HTTP::Request;
 use File::Path qw(make_path);
 use Digest::SHA qw(sha1_hex);
+use Socket ();
 use Time::Local qw(timegm);
 use PVE::Tools qw(run_command file_set_contents file_read_firstline);
 
@@ -109,9 +110,12 @@ sub on_add_hook {
     return undef;
 }
 
-# Used on hosts whose storage API predates on_update_hook_full. Here $scfg
-# holds only the options being set, so the stored entry is looked up to get
-# the configuration the update results in (deleted keys are not known here).
+# Used on hosts whose storage API predates on_update_hook_full (API 13). Here
+# $scfg holds only the options being set, so the stored entry is looked up to
+# get the configuration the update results in. The options being deleted are
+# not passed to this hook, so a collision created by deleting one (for
+# example --delete lb_project) is not refused on such a host; it is still
+# reported by the warning in activate_storage.
 sub on_update_hook {
     my ($class, $storeid, $scfg, %sensitive) = @_;
     if (grep { exists $scfg->{$_} } @COLLISION_KEYS) {
@@ -176,20 +180,36 @@ our $STORAGE_ENTRIES = sub {
 sub _storage_entries { return $STORAGE_ENTRIES->() }
 
 # The entry as it will be once the change is saved, carrying a token for the
-# cluster-identity lookup: the one in the request, else the stored one.
+# cluster-identity lookup: the one in the request, else the stored one. A
+# request that deletes the token (key present, undef) gets none: the stored
+# token must not be sent to an endpoint the same request may have just set.
 sub _candidate_scfg {
     my ($scfg, $sensitive, $storeid) = @_;
-    my $jwt = $sensitive && $sensitive->{lb_jwt};
-    return { %$scfg, lb_jwt => $jwt } if defined $jwt && length $jwt;
+    if ($sensitive && exists $sensitive->{lb_jwt}) {
+        my $jwt = $sensitive->{lb_jwt};
+        my %copy = %$scfg;
+        delete $copy{lb_jwt};
+        $copy{lb_jwt} = $jwt if defined $jwt && length $jwt;
+        return \%copy;
+    }
     return _with_jwt($scfg, $storeid);
 }
 
-# Endpoint in a comparable form: lower case, with the default port made explicit.
+# Endpoint in a comparable form: lower case, the default port made explicit,
+# and an IPv6 literal in its canonical spelling, so that "[fd00::1]:443" and
+# "[fd00:0:0:0:0:0:0:1]" are one endpoint. Only used for comparison.
 sub _endpoint_key {
     my ($ep) = @_;
     $ep = lc $ep;
-    $ep .= ':443' unless $ep =~ /:\d+$/;
-    return $ep;
+    my ($host, $port) = $ep =~ /^\[([^\]]+)\](?::(\d+))?$/ ? ($1, $2)
+                      : $ep =~ /^([^:]+)(?::(\d+))?$/      ? ($1, $2)
+                      :                                      ($ep, undef);
+    if ($host =~ /:/) {
+        my $packed = Socket::inet_pton(Socket::AF_INET6(), $host);
+        $host = Socket::inet_ntop(Socket::AF_INET6(), $packed) if defined $packed;
+        $host = "[$host]";
+    }
+    return $host . ':' . ($port // 443);
 }
 
 sub _share_api_endpoint {
@@ -208,54 +228,103 @@ sub _entry_nodes {
     return %set ? \%set : undef;
 }
 
-# Can both entries be active on one node? Not when both are restricted to
-# node lists that have no node in common.
-sub _share_a_node {
+# Names of the nodes of this Proxmox cluster, for resolving a default owner id
+# on other nodes. Overridable in tests; just this node when it cannot be read.
+our $CLUSTER_NODES = sub {
+    my $list = eval { PVE::Cluster::get_nodelist() } if defined &PVE::Cluster::get_nodelist;
+    return ($list && @$list) ? @$list : (_hostname());
+};
+
+sub _explicit_owner {
+    my ($scfg) = @_;
+    return (defined $scfg->{lb_owner_id} && length $scfg->{lb_owner_id}) ? $scfg->{lb_owner_id} : undef;
+}
+
+# The owner id under which the two entries would select the same volumes on
+# some node both can be active on, or undef when there is none. An entry
+# without lb_owner_id uses the name of the node it runs on, so its owner is
+# resolved per node rather than as this node's hostname: two entries limited
+# to another node can collide there whatever node the change is made from.
+sub _common_owner {
     my ($a, $b) = @_;
     my ($na, $nb) = (_entry_nodes($a), _entry_nodes($b));
-    return 1 unless $na && $nb;
-    return scalar grep { $nb->{$_} } keys %$na;
+    my @shared = $na && $nb ? (grep { $nb->{$_} } sort keys %$na)
+               : $na        ? (sort keys %$na)
+               : $nb        ? (sort keys %$nb)
+               :              ();
+    my $restricted = $na || $nb;
+    return undef if $restricted && !@shared;
+
+    my ($ea, $eb) = (_explicit_owner($a), _explicit_owner($b));
+    return $ea eq $eb ? $ea : undef if defined $ea && defined $eb;
+
+    my $here = _owner_id({});
+    my @nodes = $restricted ? @shared : do { my %n = map { $_ => 1 } ($here, $CLUSTER_NODES->()); sort keys %n };
+    if (!defined $ea && !defined $eb) {
+        # Both default to the node name: they agree on every node they share.
+        return (grep { $_ eq $here } @nodes) ? $here : $nodes[0];
+    }
+    my $explicit = $ea // $eb;
+    return (grep { $_ eq $explicit } @nodes) ? $explicit : undef;
 }
 
-# UUID of the cluster behind an entry, or undef when it cannot be read.
+# Cluster-identity lookups run inside Proxmox's storage.cfg lock, so they are
+# kept short as a whole: this many seconds for all of them together.
+our $UUID_PROBE_BUDGET = 8;
+
+# UUID of the cluster behind an entry, or undef when it cannot be read (an
+# unreachable endpoint, no token, an unexpected answer). Proxmox aborting the
+# command with its lock timeout is not such a failure and is passed on, so
+# that an aborted check can never end in a saved entry.
 sub _cluster_uuid {
-    my ($scfg) = @_;
-    my $data = eval { _api($scfg, 'GET', '/api/v2/cluster', undef, timeout => 5) };
-    return ($data && $data->{UUID}) ? $data->{UUID} : undef;
+    my ($scfg, $timeout) = @_;
+    my $data = eval { _api($scfg, 'GET', '/api/v2/cluster', undef, timeout => $timeout // 5) };
+    die $@ if $@ && $@ =~ /^got (?:lock (?:request )?)?timeout/;
+    return (ref $data eq 'HASH' && $data->{UUID} && !ref $data->{UUID}) ? $data->{UUID} : undef;
 }
 
-# The first other enabled lightbits entry that would share volumes with $scfg,
-# or undef. Same project, same owner id, a node in common, and the same
-# cluster: a shared API endpoint, or (with $ask_cluster) the same cluster UUID
-# as reported by the API, which also catches one cluster addressed by
-# different names or nodes.
+# The first other enabled lightbits entry that would share volumes with $scfg
+# and the owner id they would share, or an empty list. Same project, an owner
+# id in common on a node in common, and the same cluster: a shared API
+# endpoint, or (with $ask_cluster) the same cluster UUID as reported by the
+# API, which also catches one cluster addressed by different names or nodes.
+# Every entry is compared by endpoint first, without any network access.
 sub _colliding_entry {
     my ($storeid, $scfg, $ask_cluster) = @_;
-    return undef if $scfg->{disable};
+    return if $scfg->{disable};
     my $entries = _storage_entries();
-    my ($project, $owner) = (_project($scfg), _owner_id($scfg));
-    my ($uuid, $uuid_read);
+    my $project = _project($scfg);
+    my @probe;
     for my $other (sort keys %$entries) {
         next if $other eq $storeid;
         my $o = $entries->{$other};
         next unless ref $o eq 'HASH' && ($o->{type} // '') eq 'lightbits';
         next if $o->{disable};
-        next unless _project($o) eq $project && _owner_id($o) eq $owner;
-        next unless _share_a_node($scfg, $o);
-        return $other if _share_api_endpoint($scfg, $o);
-        next unless $ask_cluster;
-        ($uuid, $uuid_read) = (_cluster_uuid($scfg), 1) unless $uuid_read;
-        next unless defined $uuid;
-        my $other_uuid = _cluster_uuid(_with_jwt($o, $other));
-        return $other if defined $other_uuid && $other_uuid eq $uuid;
+        next unless _project($o) eq $project;
+        my $owner = _common_owner($scfg, $o);
+        next unless defined $owner;
+        return ($other, $owner) if _share_api_endpoint($scfg, $o);
+        push @probe, [$other, $owner];
     }
-    return undef;
+    return unless $ask_cluster && @probe;
+
+    my $deadline = time() + $UUID_PROBE_BUDGET;
+    my $left = sub { my $t = $deadline - time(); return $t > 0 ? ($t < 5 ? $t : 5) : 0 };
+    my $uuid = _cluster_uuid($scfg, $left->());
+    return unless defined $uuid;
+    for my $cand (@probe) {
+        my $t = $left->() or last;
+        my ($other, $owner) = @$cand;
+        my $other_uuid = _cluster_uuid(_with_jwt($entries->{$other}, $other), $t);
+        return ($other, $owner) if defined $other_uuid && $other_uuid eq $uuid;
+    }
+    return;
 }
 
 # What the two entries have in common, for both messages.
 sub _collision_what {
-    my ($scfg) = @_;
-    return "both use project '" . _project($scfg) . "' with owner id '" . _owner_id($scfg)
+    my ($scfg, $owner) = @_;
+    return "both use project '" . _project($scfg) . "' with owner id '$owner"
         . "' on the same Lightbits cluster, so each lists and can free the other's disks";
 }
 
@@ -263,10 +332,10 @@ sub _collision_what {
 # safe to say because the change has not happened.
 sub _refuse_colliding_entry {
     my ($storeid, $scfg) = @_;
-    my $other = _colliding_entry($storeid, $scfg, 1);
+    my ($other, $owner) = _colliding_entry($storeid, $scfg, 1);
     return unless defined $other;
     die "Lightbits storage '$storeid' would share its volumes with storage '$other': "
-        . _collision_what($scfg) . ". Use a different lb_owner_id or lb_project for "
+        . _collision_what($scfg, $owner) . ". Use a different lb_owner_id or lb_project for "
         . "'$storeid'.\n";
 }
 
@@ -275,13 +344,15 @@ sub _refuse_colliding_entry {
 # Rate-limited like the failover warning, and always shown inside a task.
 sub _warn_colliding_entry {
     my ($storeid, $scfg) = @_;
-    my $other = eval { _colliding_entry($storeid, $scfg, 0) };
+    my ($other, $owner) = eval { _colliding_entry($storeid, $scfg, 0) };
     return unless defined $other;
+    # Only a pair that can collide on this node is this node's to report.
+    return unless $owner eq _owner_id($scfg);
     return unless _in_pve_task() || _failover_should_warn("collision:$storeid:$other");
     # Not "change lb_owner_id or lb_project" here: on an entry that already
     # has disks that hides them (they are selected by exactly those values).
     warn "WARNING: Lightbits storage '$storeid' shares its volumes with storage '$other': "
-        . _collision_what($scfg) . ". Disable or remove the entry that is not needed. Do "
+        . _collision_what($scfg, $owner) . ". Disable or remove the entry that is not needed. Do "
         . "not change lb_owner_id or lb_project on an entry that already has disks: that "
         . "hides them (see README, \"More than one storage entry on the same cluster\").\n";
     return;
