@@ -30,7 +30,7 @@ body:
   attributes:
     label: Plugin version or commit
     description: The release tag or commit hash you installed from.
-    placeholder: v1.0.4
+    placeholder: v1.0.5
   validations:
     required: true
 - type: input

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-11-18
+
+Adds optional compression for new volumes, set per storage entry with `lb_compression`, and refuses two storage entries that would share the same volumes (same cluster, project and owner id), a configuration that could end in a VM's disk being freed. Also validated on the Proxmox storage API 17 (`libpve-storage-perl` 9.1.18) and on LightOS 3.22.1. No change for existing storage entries: upgrade by re-running `scripts/install.sh` on each node. Upgrade every node of a Proxmox VE cluster before setting `lb_compression`: a node on an earlier release ignores the option and drops it from `storage.cfg` on its next storage change. Coming from 1.0.1 or earlier, follow the 1.0.2 upgrade order (README "Upgrading to 1.0.2 (breaking change)").
+
+Validated on Proxmox VE 9.2.28 (`libpve-storage-perl` 9.1.16, storage API 16, and 9.1.18, storage API 17) against single-node LightOS 3.21.1 and 3.22.1 clusters: the unit suite (800 tests), the eleven existing live end-to-end suites and the new `t/e2e/compression.sh`; on a 2-node HA cluster with a corosync QDevice, live migration of a VM on a compressed storage (12 to 27 ms downtime, data checksums unchanged) and HA failover after a hard power cut of a node (VM restarted on the surviving node after 195 s, synced data intact).
+
 ### Added
 
 - **Compression for new volumes** ([#70](https://github.com/LightBitsLabs/pve-lightbits/issues/70)). New optional storage property `lb_compression` (boolean, default off). When set, `alloc_image` sends it to LightOS as the volume's `compression` setting (`"true"`/`"false"`), so every disk created on that storage entry afterwards, cloud-init drives included, is compressed (or explicitly not). Unset, the create request is unchanged from earlier releases and volumes keep the cluster default (compression off). Existing volumes are not touched. Enable with `pvesm set <storeid> --lb_compression 1`; to mix compressed and uncompressed disks, use two storage entries on the same cluster, each with its own `lb_owner_id` or `lb_project` (see the fix below). `pvesm` stores the value as `1`/`0`; set the option only once every node of the Proxmox VE cluster runs this release, since an older node ignores it and drops it from `storage.cfg` on its next storage change. README "Compression", unit test `t/compression.t`, live test `t/e2e/compression.sh`.

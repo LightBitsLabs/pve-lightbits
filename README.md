@@ -310,7 +310,7 @@ pvesm add lightbits lb-compressed ... --lb_owner_id pve-cluster1-compressed --lb
 
 `pvesm` accepts `1`/`0` and the usual spellings (`on`/`off`, `yes`/`no`, `true`/`false`) and stores `1` or `0`. When editing `/etc/pve/storage.cfg` by hand, write `lb_compression 1` or `lb_compression 0`, and remove the whole line to go back to the cluster default: Proxmox rejects any other value there with a parse warning and ignores the line, which leaves compression off.
 
-**Set it only once every node of the Proxmox VE cluster runs a plugin release that knows the option.** The storage definition is shared by all nodes; a node still on 1.0.4 or earlier does not know `lb_compression`: it prints `unable to parse value of 'lb_compression': unknown property type` on every storage command, creates its disks without compression, and removes the option from `storage.cfg` the next time any storage setting is changed from that node. The same applies after downgrading the plugin: the storage keeps working, and the option has to be set again after returning to a release that knows it.
+**Set it only once every node of the Proxmox VE cluster runs plugin 1.0.5 or later.** The storage definition is shared by all nodes; a node still on 1.0.4 or earlier does not know `lb_compression`: it prints `unable to parse value of 'lb_compression': unknown property type` on every storage command, creates its disks without compression, and removes the option from `storage.cfg` the next time any storage setting is changed from that node. The same applies after downgrading the plugin: the storage keeps working, and the option has to be set again after returning to a release that knows it.
 
 **The storage size Proxmox shows changes once compressed data is stored.** The total and free space in `pvesm status` and in the web UI are what the Lightbits cluster reports: not its raw capacity, but an estimate of how much data it can hold, calculated as the usable physical capacity multiplied by the compression ratio of the data stored so far. As compressed data is written the total grows, and it shrinks again when that data is deleted or less compressible data arrives. For example, a cluster shown as 2.49 TiB while empty was shown as 3.87 TiB after 2 GiB of well-compressible data was written to a compressed disk. Keep in mind:
 
@@ -810,7 +810,7 @@ pve-lightbits/
 | Component | Version |
 |---|---|
 | Proxmox VE | 9.x (tested on 9.2, `libpve-storage-perl` up to 9.1.18, storage API 17) |
-| Lightbits LightOS | 3.x (tested on 3.18.4, 3.20.1 and 3.21.1) |
+| Lightbits LightOS | 3.x (tested on 3.18.4, 3.20.1, 3.21.1 and 3.22.1) |
 | Perl | 5.36+ |
 | Linux kernel | 5.0+ (nvme_tcp module required) |
 
