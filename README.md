@@ -300,7 +300,7 @@ pvesm set lb-storage --delete lb_compression   # back to the cluster default
 ```
 
 - **It is a setting of the storage entry, not of a single disk.** Every disk the plugin creates on that entry afterwards follows it: VM disks, cloud-init drives, full clones and restores onto the storage. No restart is needed; the next disk created uses the new value.
-- **Existing disks keep their setting.** Changing the option does not touch volumes that already exist.
+- **Existing disks keep their setting.** `lb_compression` only affects disks created after it is set; the plugin never changes volumes that already exist. LightOS itself can change the setting of an existing volume, on the cluster and outside Proxmox (`lbcli update volume --project-name <project> --uuid <uuid> --compression true`, see [lbcli update volume](https://documentation.lightbitslabs.com/lightbits-cli-reference-guide/lbcli-update-volume)).
 - **To mix compressed and uncompressed disks**, define two storage entries that point at the same Lightbits cluster, one with `--lb_compression 1` and one without, and choose between them per disk (CLI or the storage dropdown in the web UI). The Proxmox storage API has no per-disk option for this. The two entries need different owner ids or different projects; see [More than one storage entry on the same cluster](#more-than-one-storage-entry-on-the-same-cluster).
 
 ```bash
@@ -308,7 +308,7 @@ pvesm add lightbits lb-fast       ... --lb_owner_id pve-cluster1-fast
 pvesm add lightbits lb-compressed ... --lb_owner_id pve-cluster1-compressed --lb_compression 1
 ```
 
-`pvesm` accepts `1`/`0` and the usual spellings (`on`/`off`, `yes`/`no`, `true`/`false`) and stores `1` or `0`. When editing `/etc/pve/storage.cfg` by hand, write `lb_compression 1` or `lb_compression 0`: Proxmox rejects any other value there with a parse warning and ignores the line, which leaves compression off.
+`pvesm` accepts `1`/`0` and the usual spellings (`on`/`off`, `yes`/`no`, `true`/`false`) and stores `1` or `0`. When editing `/etc/pve/storage.cfg` by hand, write `lb_compression 1` or `lb_compression 0`, and remove the whole line to go back to the cluster default: Proxmox rejects any other value there with a parse warning and ignores the line, which leaves compression off.
 
 **Set it only once every node of the Proxmox VE cluster runs a plugin release that knows the option.** The storage definition is shared by all nodes; a node still on 1.0.4 or earlier does not know `lb_compression`: it prints `unable to parse value of 'lb_compression': unknown property type` on every storage command, creates its disks without compression, and removes the option from `storage.cfg` the next time any storage setting is changed from that node. The same applies after downgrading the plugin: the storage keeps working, and the option has to be set again after returning to a release that knows it.
 

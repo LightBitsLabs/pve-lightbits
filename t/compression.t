@@ -47,6 +47,7 @@ ok( $class->options()->{lb_compression}{optional}, 'lb_compression is optional' 
 
 # ── unset: request unchanged, no compression field ─────────────────────────────
 my $b = alloc();
+is( ref $b, 'HASH', 'a create request was sent' );
 ok( !exists $b->{compression}, 'no compression field when lb_compression is unset' );
 
 # ── set: sent as the API's string form ─────────────────────────────────────────

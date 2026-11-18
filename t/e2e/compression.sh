@@ -18,7 +18,7 @@
 # on the storage entry changes, and any disk created on that entry by someone
 # else picks the test value up: run it against an entry used for testing.
 #
-# A pass is exit code 0 with a last line "== N passed, 0 failed ==". The
+# A pass is exit code 0 with a last line "== 11 passed, 0 failed ==". The
 # script stops at the first command that fails (set -e), so the absence of
 # FAIL lines alone is not a pass.
 #
@@ -49,11 +49,15 @@ else
     echo "NOTE: unit tests not found next to this script; skipping the unit gate." >&2
 fi
 
-# --- storage credentials + API client (same approach as vanished_resource.sh) --
+# --- storage credentials + API client ------------------------------------------
+# Options are read through Proxmox's own parser, so this script and pvesm see
+# the same entry, and an option that is not set (empty output) is told apart
+# from one set to 0.
 scfg_val() {
-    awk -v s="$1" -v k="$2" '
-        /^[a-z]+: /   { in_blk = ($0 == "lightbits: " s) ; next }
-        in_blk && $1 == k { sub(/^[ \t]*[^ \t]+[ \t]+/, ""); print; exit }' /etc/pve/storage.cfg
+    perl -MPVE::Storage -e '
+        my $e = PVE::Storage::config()->{ids}{$ARGV[0]};
+        exit 0 unless $e && $e->{type} eq "lightbits";
+        print $e->{$ARGV[1]} if defined $e->{$ARGV[1]};' "$1" "$2"
 }
 API_HOSTS="$(scfg_val "$STORAGE" lb_api_host)"
 JWT="$(scfg_val "$STORAGE" lb_jwt)"
@@ -83,18 +87,18 @@ compression_of_uuid() {
     api GET "/api/v2/volumes/$1?projectName=$PROJECT" \
         | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("compression","")).lower())'
 }
-# Same for the VM's cloud-init drive: the Available volume named for this VM
-# and its current vmgenid (a volume still being deleted from an earlier run
-# with the same VM id must not be picked).
-compression_of_cloudinit() {
-    local gen
-    gen="$(qm config "$1" | awk '/^vmgenid:/{print $2; exit}')"
+# The VM's cloud-init drive as "<uuid> <compression>": the single Available
+# volume labelled pveVmid=<vmid> and pveRole=cloudinit (a volume still being
+# deleted from an earlier run with the same VM id must not be picked). Empty
+# when there is not exactly one.
+cloudinit_volume() {
     api GET "/api/v2/volumes?projectName=$PROJECT" | python3 -c '
 import json,sys
-want = "vm-'"$1"'-'"$gen"'-cloudinit"
 vols = json.load(sys.stdin).get("volumes") or []
-m = [v for v in vols if v.get("name") == want and v.get("state") == "Available"]
-print(str(m[0].get("compression","")).lower() if len(m) == 1 else "")'
+def lab(v): return {l.get("key"): l.get("value") for l in (v.get("labels") or [])}
+m = [v for v in vols if v.get("state") == "Available"
+     and lab(v).get("pveVmid") == sys.argv[1] and lab(v).get("pveRole") == "cloudinit"]
+print(m[0]["UUID"], str(m[0].get("compression","")).lower()) if len(m) == 1 else print("")' "$1"
 }
 # Is the volume gone from the cluster? Only a 404, or a Deleting/Deleted state,
 # counts: an API error is not evidence of anything.
@@ -114,9 +118,15 @@ vol_gone() {
 }
 
 ORIG="$(scfg_val "$STORAGE" lb_compression)"
+# Remove the option if it is set; fail if it is still there afterwards.
+unset_option() {
+    [ -z "$(scfg_val "$STORAGE" lb_compression)" ] && return 0
+    pvesm set "$STORAGE" --delete lb_compression >/dev/null
+    [ -z "$(scfg_val "$STORAGE" lb_compression)" ]
+}
 restore_option() {
     if [ -n "$ORIG" ]; then pvesm set "$STORAGE" --lb_compression "$ORIG" >/dev/null
-    else pvesm set "$STORAGE" --delete lb_compression >/dev/null 2>&1 || true; fi
+    else unset_option; fi
 }
 is_our_vm() {
     local name
@@ -128,7 +138,7 @@ cleanup() {
         qm stop "$VMID" >/dev/null 2>&1 || true
         qm destroy "$VMID" --purge 1 >/dev/null 2>&1 || true
     fi
-    restore_option
+    restore_option || echo "WARNING: could not restore lb_compression on '$STORAGE' (original: '${ORIG:-not set}')" >&2
 }
 trap cleanup EXIT
 
@@ -151,7 +161,7 @@ qm create "$VMID" --memory 512 --scsihw virtio-scsi-single --name "$TEST_VM_NAME
 
 # ── 1. option unset: cluster default ───────────────────────────────────────────
 echo "== lb_compression unset =="
-pvesm set "$STORAGE" --delete lb_compression >/dev/null 2>&1 || true
+unset_option || { echo "ABORT: could not remove lb_compression from '$STORAGE'." >&2; exit 1; }
 qm set "$VMID" --scsi0 "${STORAGE}:${DISK_GB}" >/dev/null
 U0="$(disk_uuid scsi0)"
 expect "unset, new disk scsi0 (cluster default)" false "$(compression_of_uuid "$U0")"
@@ -168,7 +178,8 @@ qm set "$VMID" --scsi1 "${STORAGE}:${DISK_GB}" >/dev/null
 U1="$(disk_uuid scsi1)"
 expect "lb_compression 1, new disk scsi1" true "$(compression_of_uuid "$U1")"
 qm set "$VMID" --ide2 "${STORAGE}:cloudinit" >/dev/null
-expect "lb_compression 1, new cloud-init drive" true "$(compression_of_cloudinit "$VMID")"
+read -r UCI CI_COMP <<<"$(cloudinit_volume "$VMID")" || true
+expect "lb_compression 1, new cloud-init drive" true "${CI_COMP:-}"
 
 if qm start "$VMID" >/dev/null 2>&1 && qm stop "$VMID" >/dev/null 2>&1; then
     ok "VM with a compressed disk starts and stops"
@@ -194,11 +205,15 @@ expect "disk scsi1 after a resize" true "$(compression_of_uuid "$U1")"
 # ── cleanup: destroy leaves nothing behind ─────────────────────────────────────
 qm destroy "$VMID" --purge 1 >/dev/null
 left=0
-for u in "$U0" "$U1" "$U2"; do
+for u in "$U0" "$U1" "$U2" "${UCI:-missing-cloudinit-uuid}"; do
     vol_gone "$u" || left=$((left+1))
 done
-if [ "$left" = 0 ]; then ok "qm destroy removed all test volumes"; else bad "$left test volume(s) not confirmed gone from the cluster"; fi
-restore_option
+if [ "$left" = 0 ]; then ok "qm destroy removed all test volumes, cloud-init drive included"; else bad "$left test volume(s) not confirmed gone from the cluster"; fi
+if restore_option && [ "$(scfg_val "$STORAGE" lb_compression)" = "$ORIG" ]; then
+    ok "lb_compression on '$STORAGE' is back to its original state (${ORIG:-not set})"
+else
+    bad "could not restore lb_compression on '$STORAGE'; original: '${ORIG:-not set}', now: '$(scfg_val "$STORAGE" lb_compression)'"
+fi
 trap - EXIT
 
 echo "== $pass passed, $fail failed =="
