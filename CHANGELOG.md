@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Compression for new volumes** ([#70](https://github.com/LightBitsLabs/pve-lightbits/issues/70)). New optional storage property `lb_compression` (boolean, default off). When set, `alloc_image` sends it to LightOS as the volume's `compression` setting (`"true"`/`"false"`), so every disk created on that storage entry afterwards, cloud-init drives included, is compressed (or explicitly not). Unset, the create request is unchanged from earlier releases and volumes keep the cluster default (compression off). Existing volumes are not touched. Enable with `pvesm set <storeid> --lb_compression 1`; to mix compressed and uncompressed disks, use two storage entries on the same cluster, each with its own `lb_owner_id` or `lb_project` (see the fix below). `pvesm` stores the value as `1`/`0`; set the option only once every node of the Proxmox VE cluster runs this release, since an older node ignores it and drops it from `storage.cfg` on its next storage change. README "Compression", unit test `t/compression.t`, live test `t/e2e/compression.sh`.
+
 ### Fixed
 
 - **Two storage entries could share the same volumes** ([#71](https://github.com/LightBitsLabs/pve-lightbits/issues/71)). The plugin selects a storage entry's volumes by Lightbits project and owner id, not by storage id, so two entries on one cluster with the same `lb_project` and the same owner id both listed every volume: `qm rescan` attached the second copy to the VM as an "unused disk", and removing it freed the volume in use. `pvesm add` and `pvesm set` now refuse an entry that would share cluster, project and owner id with another enabled `lightbits` entry (the cluster is recognised by a shared API endpoint or by its UUID), naming the other entry. An update that does not touch `lb_api_host`, `lb_project`, `lb_owner_id`, `disable` or `nodes` is not checked, so an existing pair can still be maintained; using such a pair logs a warning. No change to volumes or labels. README "More than one storage entry on the same cluster"; unit test `t/storage_collision.t`.
