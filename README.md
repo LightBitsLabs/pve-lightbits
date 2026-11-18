@@ -312,6 +312,13 @@ pvesm add lightbits lb-compressed ... --lb_owner_id pve-cluster1-compressed --lb
 
 **Set it only once every node of the Proxmox VE cluster runs a plugin release that knows the option.** The storage definition is shared by all nodes; a node still on 1.0.4 or earlier does not know `lb_compression`: it prints `unable to parse value of 'lb_compression': unknown property type` on every storage command, creates its disks without compression, and removes the option from `storage.cfg` the next time any storage setting is changed from that node. The same applies after downgrading the plugin: the storage keeps working, and the option has to be set again after returning to a release that knows it.
 
+**The storage size Proxmox shows changes once compressed data is stored.** The total and free space in `pvesm status` and in the web UI are what the Lightbits cluster reports: not its raw capacity, but an estimate of how much data it can hold, calculated as the usable physical capacity multiplied by the compression ratio of the data stored so far. As compressed data is written the total grows, and it shrinks again when that data is deleted or less compressible data arrives. For example, a cluster shown as 2.49 TiB while empty was shown as 3.87 TiB after 2 GiB of well-compressible data was written to a compressed disk. Keep in mind:
+
+- It is a projection that assumes future data compresses like the data already stored. With little data on the cluster it can move a lot.
+- It is a figure for the whole cluster, so every storage entry on that cluster shows the same moving total, including entries without `lb_compression`.
+
+The fields behind it are `estimatedLogicalStorage` and `estimatedFreeLogicalStorage` in the [Lightbits REST API reference](https://documentation.lightbitslabs.com/api-service-durosapiv2.proto/ref); the calculation is described in the Lightbits [Metrics Families](https://documentation.lightbitslabs.com/lightbits-metrics/metrics-families) documentation.
+
 To check a volume's setting on the cluster, look at its `Compression` field (`lbcli get volume --project-name <project> --uuid <uuid>`).
 
 #### More than one storage entry on the same cluster
