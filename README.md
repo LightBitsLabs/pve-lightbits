@@ -289,6 +289,30 @@ pvesm add lightbits lb-storage \
 
 `--lb_replica_count` sets how many copies of each volume the cluster keeps: `3` on a cluster of three or more nodes, `2` or `3` on a multi-node cluster in general. It defaults to `1`, and the value must be supported by the cluster — a single-node cluster only accepts `1`.
 
+#### More than one storage entry on the same cluster
+
+A storage entry's disks are selected by Lightbits project and owner id (`lb_owner_id`, by default the node's hostname), not by the entry's name. Two entries that point at the same cluster with the same project and the same owner id would therefore both list, and act on, the same disks: Proxmox would see each disk twice, a `qm rescan` would add the second copy to the VM as an "unused disk", and removing that unused disk would delete the volume the VM is using.
+
+The plugin refuses such a pair. `pvesm add` and `pvesm set` fail with `Lightbits storage '<new>' would share its volumes with storage '<existing>'` when another `lightbits` entry already uses the same cluster, project and owner id. Both entries must be enabled and able to run on at least one common node (an entry without `lb_owner_id` counts under the name of each node it can run on). The cluster is recognised by an API endpoint the two entries have in common, or, when they have none, by asking both for their cluster UUID, so one cluster addressed through different nodes or names is caught as long as it answers. These lookups are limited to a few seconds in total; if an entry could not be checked in that time the change is accepted and a `WARNING: ... could not check within 8s whether it shares a cluster with '<entry>'` line names it.
+
+`pvesm set` runs the check only when the change touches `lb_api_host`, `lb_project`, `lb_owner_id`, `disable` or `nodes`. Any other change, such as a token rotation or a replica count, is accepted even on a pair that already collides, so such a pair can still be maintained.
+
+To run several entries against one cluster, give each one its own owner id (or its own project):
+
+```bash
+pvesm add lightbits lb-a ... --lb_project default --lb_owner_id pve-cluster1-a
+pvesm add lightbits lb-b ... --lb_project default --lb_owner_id pve-cluster1-b
+```
+
+A pair created before this check existed, or by editing `/etc/pve/storage.cfg` by hand, keeps working, and the plugin logs `WARNING: Lightbits storage '<a>' shares its volumes with storage '<b>'` when it is used: in every task log, and in the journal at most once every 10 minutes per node and per pair. The warning compares the configured API endpoints only and makes no API call, so a pair that reaches one cluster through different endpoints is not reported there; the absence of the warning does not rule a duplicate out. To clean such a pair up, keep one entry and retire the other. Do the steps in this order:
+
+1. **Remove duplicate references first, without freeing anything.** If a `qm rescan` ran while the pair existed, VMs carry `unusedN:` lines under one storage id for volumes they already use under the other (the same UUID at the end of both volume names). Delete those `unusedN:` lines from the VM configuration file (`/etc/pve/qemu-server/<vmid>.conf`) with an editor. Do not remove them with `qm set --delete`, the web UI's *Remove*, or `qm disk move --delete 1`: each of those frees the volume, which is the VM's own disk.
+2. Find the guest disks that genuinely refer to the entry you are retiring: `grep -l '<storeid>:' /etc/pve/qemu-server/*.conf /etc/pve/nodes/*/qemu-server/*.conf`. A guest refers to a disk by storage id, so a disk listed by both entries still belongs to the one named in the VM's configuration.
+3. Move each of them to an entry that does not collide (`qm disk move <vmid> <disk> <target-storage> --delete 1`). Moving between the two colliding entries themselves is not a fix: both select the same volumes.
+4. Only when no guest refers to it any more, disable or remove the retired entry. Disabling or removing an entry that guests still refer to leaves those guests unable to start.
+
+Do not change `lb_owner_id` or `lb_project` on an entry that already has disks: that hides its existing disks (see [Volumes the plugin does not own](#volumes-the-plugin-does-not-own)).
+
 **Security note:** as added above, the storage entry does not verify the cluster's TLS certificate (verification is off by default in this release, see the next section). Pinning the cluster certificate is one more `pvesm set` line and is the recommended follow-up for any entry that carries a production JWT.
 
 #### TLS verification for the API connection
