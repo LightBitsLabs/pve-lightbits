@@ -289,6 +289,19 @@ pvesm add lightbits lb-storage \
 
 `--lb_replica_count` sets how many copies of each volume the cluster keeps: `3` on a cluster of three or more nodes, `2` or `3` on a multi-node cluster in general. It defaults to `1`, and the value must be supported by the cluster — a single-node cluster only accepts `1`.
 
+#### More than one storage entry on the same cluster
+
+A storage entry's disks are selected by Lightbits project and owner id (`lb_owner_id`, by default the node's hostname), not by the entry's name. Two entries that point at the same cluster with the same project and the same owner id would therefore both list, and act on, the same disks: Proxmox would see each disk twice, a `qm rescan` would add the second copy to the VM as an "unused disk", and removing that unused disk would delete the volume the VM is using.
+
+The plugin refuses such a pair. `pvesm add` and `pvesm set` fail with `Lightbits storage '<new>' would share its volumes with storage '<existing>'` when another enabled `lightbits` entry already uses the same cluster, project and owner id on a node the two have in common. To run several entries against one cluster, give each one its own owner id (or its own project):
+
+```bash
+pvesm add lightbits lb-a ... --lb_project default --lb_owner_id pve-cluster1-a
+pvesm add lightbits lb-b ... --lb_project default --lb_owner_id pve-cluster1-b
+```
+
+A pair created before this check existed, or by editing `/etc/pve/storage.cfg` by hand, keeps working, and the plugin logs `WARNING: Lightbits storage '<a>' shares its volumes with storage '<b>'` when it is used (in every task log; in the journal at most once every 10 minutes). Do not fix such a pair by changing `lb_owner_id` or `lb_project` on an entry that already has disks: that hides its existing disks (see [Volumes the plugin does not own](#volumes-the-plugin-does-not-own)). Disable or remove the entry that has no disks of its own instead, or move the disks of one entry to a new, distinct entry (`qm disk move`) and then remove the emptied one.
+
 **Security note:** as added above, the storage entry does not verify the cluster's TLS certificate (verification is off by default in this release, see the next section). Pinning the cluster certificate is one more `pvesm set` line and is the recommended follow-up for any entry that carries a production JWT.
 
 #### TLS verification for the API connection

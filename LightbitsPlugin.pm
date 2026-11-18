@@ -96,15 +96,29 @@ sub _apply_sensitive {
     return;
 }
 
+# Options that decide whether two storage entries share volumes (see "Storage
+# entries that would share volumes" below); an update touching none of them
+# is not checked.
+our @COLLISION_KEYS = qw(lb_api_host lb_project lb_owner_id disable nodes);
+
 sub on_add_hook {
     my ($class, $storeid, $scfg, %sensitive) = @_;
+    # Before the token is persisted: a refused entry must leave nothing behind.
+    _refuse_colliding_entry($storeid, _candidate_scfg($scfg, \%sensitive, $storeid));
     _apply_sensitive($storeid, \%sensitive);
     return undef;
 }
 
-# Used on hosts whose storage API predates on_update_hook_full.
+# Used on hosts whose storage API predates on_update_hook_full. Here $scfg
+# holds only the options being set, so the stored entry is looked up to get
+# the configuration the update results in (deleted keys are not known here).
 sub on_update_hook {
     my ($class, $storeid, $scfg, %sensitive) = @_;
+    if (grep { exists $scfg->{$_} } @COLLISION_KEYS) {
+        my $stored = _storage_entries()->{$storeid} // {};
+        _refuse_colliding_entry($storeid,
+            _candidate_scfg({ %$stored, %$scfg }, \%sensitive, $storeid));
+    }
     _apply_sensitive($storeid, \%sensitive);
     return undef;
 }
@@ -116,6 +130,15 @@ sub on_update_hook {
 sub on_update_hook_full {
     my ($class, $storeid, $scfg, $update, $delete, $sensitive) = @_;
     $sensitive //= {};
+    # Only an update that changes what the collision depends on is checked, so
+    # an entry that already collides (created before this check existed) can
+    # still be maintained, for example to rotate its token.
+    my %deleted = map { $_ => 1 } @{ $delete // [] };
+    if (grep { exists $update->{$_} || $deleted{$_} } @COLLISION_KEYS) {
+        my %result = (%$scfg, %{ $update // {} });
+        delete @result{ keys %deleted };
+        _refuse_colliding_entry($storeid, _candidate_scfg(\%result, $sensitive, $storeid));
+    }
     _apply_sensitive($storeid, $sensitive);
     if (defined $scfg->{lb_jwt}) {
         _write_jwt($storeid, $scfg->{lb_jwt})
@@ -129,6 +152,132 @@ sub on_delete_hook {
     my ($class, $storeid, $scfg) = @_;
     _delete_jwt($storeid);
     return undef;
+}
+
+# ── Storage entries that would share volumes ──────────────────────────────────
+#
+# A storage entry's volumes are selected by Lightbits project and owner id
+# (_is_owned_volume), not by storage id. Two entries on the same cluster with
+# the same project and the same owner id would therefore both list, and act
+# on, the same volumes: Proxmox sees each disk twice, `qm rescan` adds the
+# second copy to the VM as an "unused disk", and removing that unused disk
+# frees the volume the VM is using. Such a pair is refused when an entry is
+# added or changed (the hooks above), and warned about when one that already
+# exists is used (activate_storage).
+
+# All storage entries of this Proxmox node/cluster, by storage id. Overridable
+# in tests. PVE::Storage is not loaded by this module (it loads the plugins);
+# it is always present inside Proxmox.
+our $STORAGE_ENTRIES = sub {
+    return {} unless defined &PVE::Storage::config;
+    my $cfg = PVE::Storage::config();
+    return ($cfg && $cfg->{ids}) || {};
+};
+sub _storage_entries { return $STORAGE_ENTRIES->() }
+
+# The entry as it will be once the change is saved, carrying a token for the
+# cluster-identity lookup: the one in the request, else the stored one.
+sub _candidate_scfg {
+    my ($scfg, $sensitive, $storeid) = @_;
+    my $jwt = $sensitive && $sensitive->{lb_jwt};
+    return { %$scfg, lb_jwt => $jwt } if defined $jwt && length $jwt;
+    return _with_jwt($scfg, $storeid);
+}
+
+# Endpoint in a comparable form: lower case, with the default port made explicit.
+sub _endpoint_key {
+    my ($ep) = @_;
+    $ep = lc $ep;
+    $ep .= ':443' unless $ep =~ /:\d+$/;
+    return $ep;
+}
+
+sub _share_api_endpoint {
+    my ($a, $b) = @_;
+    my %seen = map { _endpoint_key($_) => 1 } _api_endpoints($a->{lb_api_host});
+    return scalar grep { $seen{ _endpoint_key($_) } } _api_endpoints($b->{lb_api_host});
+}
+
+# Node restriction of an entry as a set; undef means "every node".
+sub _entry_nodes {
+    my ($scfg) = @_;
+    my $n = $scfg->{nodes};
+    return undef unless defined $n;
+    return { %$n } if ref $n eq 'HASH';
+    my %set = map { $_ => 1 } grep { length } split /[,;\s]+/, $n;
+    return %set ? \%set : undef;
+}
+
+# Can both entries be active on one node? Not when both are restricted to
+# node lists that have no node in common.
+sub _share_a_node {
+    my ($a, $b) = @_;
+    my ($na, $nb) = (_entry_nodes($a), _entry_nodes($b));
+    return 1 unless $na && $nb;
+    return scalar grep { $nb->{$_} } keys %$na;
+}
+
+# UUID of the cluster behind an entry, or undef when it cannot be read.
+sub _cluster_uuid {
+    my ($scfg) = @_;
+    my $data = eval { _api($scfg, 'GET', '/api/v2/cluster', undef, timeout => 5) };
+    return ($data && $data->{UUID}) ? $data->{UUID} : undef;
+}
+
+# The first other enabled lightbits entry that would share volumes with $scfg,
+# or undef. Same project, same owner id, a node in common, and the same
+# cluster: a shared API endpoint, or (with $ask_cluster) the same cluster UUID
+# as reported by the API, which also catches one cluster addressed by
+# different names or nodes.
+sub _colliding_entry {
+    my ($storeid, $scfg, $ask_cluster) = @_;
+    return undef if $scfg->{disable};
+    my $entries = _storage_entries();
+    my ($project, $owner) = (_project($scfg), _owner_id($scfg));
+    my ($uuid, $uuid_read);
+    for my $other (sort keys %$entries) {
+        next if $other eq $storeid;
+        my $o = $entries->{$other};
+        next unless ref $o eq 'HASH' && ($o->{type} // '') eq 'lightbits';
+        next if $o->{disable};
+        next unless _project($o) eq $project && _owner_id($o) eq $owner;
+        next unless _share_a_node($scfg, $o);
+        return $other if _share_api_endpoint($scfg, $o);
+        next unless $ask_cluster;
+        ($uuid, $uuid_read) = (_cluster_uuid($scfg), 1) unless $uuid_read;
+        next unless defined $uuid;
+        my $other_uuid = _cluster_uuid(_with_jwt($o, $other));
+        return $other if defined $other_uuid && $other_uuid eq $uuid;
+    }
+    return undef;
+}
+
+sub _collision_text {
+    my ($storeid, $scfg, $other) = @_;
+    return "Lightbits storage '$storeid' would share its volumes with storage '$other': "
+        . "both use project '" . _project($scfg) . "' with owner id '" . _owner_id($scfg)
+        . "' on the same Lightbits cluster, so each would list and could free the other's "
+        . "disks. Give one of them a different lb_owner_id or lb_project.\n";
+}
+
+sub _refuse_colliding_entry {
+    my ($storeid, $scfg) = @_;
+    my $other = _colliding_entry($storeid, $scfg, 1);
+    die _collision_text($storeid, $scfg, $other) if defined $other;
+    return;
+}
+
+# For a pair that already exists (created by an earlier release or by editing
+# storage.cfg): no API call here, activate_storage runs every few seconds.
+# Rate-limited like the failover warning, and always shown inside a task.
+sub _warn_colliding_entry {
+    my ($storeid, $scfg) = @_;
+    my $other = eval { _colliding_entry($storeid, $scfg, 0) };
+    return unless defined $other;
+    return unless _in_pve_task() || _failover_should_warn("collision:$storeid:$other");
+    (my $text = _collision_text($storeid, $scfg, $other)) =~ s/would share/shares/;
+    warn "WARNING: $text";
+    return;
 }
 
 # ── Lightbits REST API helper ─────────────────────────────────────────────────
@@ -1533,6 +1682,7 @@ sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
     $scfg = _with_jwt($scfg, $storeid);
     make_path("$SYMLINK_DIR/$storeid");
+    _warn_colliding_entry($storeid, $scfg);
     return 1;
 }
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two storage entries could share the same volumes** ([#71](https://github.com/LightBitsLabs/pve-lightbits/issues/71)). The plugin selects a storage entry's volumes by Lightbits project and owner id, not by storage id, so two entries on one cluster with the same `lb_project` and the same owner id both listed every volume: `qm rescan` attached the second copy to the VM as an "unused disk", and removing it freed the volume in use. `pvesm add` and `pvesm set` now refuse an entry that would share cluster, project and owner id with another enabled `lightbits` entry (the cluster is recognised by a shared API endpoint or by its UUID), naming the other entry. An update that does not touch `lb_api_host`, `lb_project`, `lb_owner_id`, `disable` or `nodes` is not checked, so an existing pair can still be maintained; using such a pair logs a warning. No change to volumes or labels. README "More than one storage entry on the same cluster"; unit test `t/storage_collision.t`.
+
 ## [1.0.4] - 2026-10-26
 
 Hardens snapshot rollback: the plugin now waits until LightOS has applied the rollback before returning, instead of relying on the volume state alone. The installer can also install discovery-client from another release of Lightbits' repository, and the docs make clear that its default Ubuntu repository path is not an Ubuntu requirement. No configuration or storage changes: upgrade by re-running `scripts/install.sh` on each node. Coming from 1.0.1 or earlier, follow the 1.0.2 upgrade order (README "Upgrading to 1.0.2 (breaking change)").
