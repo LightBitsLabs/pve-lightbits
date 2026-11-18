@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Validated storage API maximum raised from 16 to 17** for `libpve-storage-perl` 9.1.17/9.1.18 (in Proxmox's `pve-test` repository as of 2026-11-17). Hosts on those packages logged `Plugin "PVE::Storage::Custom::LightbitsPlugin" is implementing an older storage API, an upgrade is recommended` on every `pvesm` and GUI storage call. API 17 adds guest volume types (`vm-vol`, `vm-state`, `ct-vol`) that a storage may be restricted to, endpoints describing the installed storage plugins, and an opt-in way for third-party plugins to isolate their property names; `images` keeps allowing every VM volume and this plugin does not opt in, so there is no plugin behaviour change. Validated on Proxmox VE 9.2.28 with `libpve-storage-perl` 9.1.18 against a single-node LightOS 3.21.1 cluster: the warning reproduced before the change and is gone after it, and all eleven live end-to-end suites pass.
+
 ## [1.0.4] - 2026-10-26
 
 Hardens snapshot rollback: the plugin now waits until LightOS has applied the rollback before returning, instead of relying on the volume state alone. The installer can also install discovery-client from another release of Lightbits' repository, and the docs make clear that its default Ubuntu repository path is not an Ubuntu requirement. No configuration or storage changes: upgrade by re-running `scripts/install.sh` on each node. Coming from 1.0.1 or earlier, follow the 1.0.2 upgrade order (README "Upgrading to 1.0.2 (breaking change)").

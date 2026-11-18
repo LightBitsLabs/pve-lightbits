@@ -737,7 +737,7 @@ sub _epoch_from_iso8601 {
 # Highest storage APIVER whose contract this plugin satisfies. Bump as newer
 # Proxmox VE releases are validated. See the API changelog at
 # https://pve.proxmox.com/wiki/Storage_Plugin_Development
-my $TESTED_APIVER = 16;   # PVE 9.x: qemu_blockdev_options (12), get_identity (14),
+my $TESTED_APIVER = 17;   # PVE 9.x: qemu_blockdev_options (12), get_identity (14),
                           # volume_resize 'snapname' param + volume_snapshot_info
                           # 'virtual-size' field (15) — both additive/optional per
                           # libpve-storage-perl 9.1.6's changelog, no plugin change needed.
@@ -747,6 +747,13 @@ my $TESTED_APIVER = 16;   # PVE 9.x: qemu_blockdev_options (12), get_identity (1
                           # only calls them from the base-class alloc_image and
                           # rename_volume, which this plugin does not use, and the
                           # 'import' content type, which this plugin does not offer.
+                          # 17 (libpve-storage-perl 9.1.17/9.1.18): guest volume
+                          # types ('vm-vol', 'vm-state', 'ct-vol') that a storage
+                          # MAY be restricted to; 'images' keeps allowing every VM
+                          # volume, so existing entries do not change. Endpoints
+                          # describing installed plugins, and an opt-in way for a
+                          # third-party plugin to isolate its property names; this
+                          # plugin does not opt in. No plugin change needed.
 
 # Report the storage API version of the *running* host rather than a fixed
 # number, because the APIVER differs across PVE point releases and the loader
