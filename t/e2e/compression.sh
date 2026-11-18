@@ -18,6 +18,11 @@
 # on the storage entry changes, and any disk created on that entry by someone
 # else picks the test value up: run it against an entry used for testing.
 #
+# The script's own API requests (curl -k) do not verify the cluster's
+# certificate, whatever lb_fingerprint / lb_ssl_verify / lb_ca_file the
+# storage entry sets; like the other t/e2e scripts, it is meant for a lab
+# network.
+#
 # A pass is exit code 0 with a last line "== 11 passed, 0 failed ==". The
 # script stops at the first command that fails (set -e), so the absence of
 # FAIL lines alone is not a pass.
