@@ -137,7 +137,7 @@ is(scalar @asked, 0, 'before any cluster lookup');
     no warnings 'once';
     local $PVE::Storage::Custom::LightbitsPlugin::UUID_PROBE_BUDGET = 0;
     is(add_err('lb-new', lb(lb_api_host => 'other-name-for-z:443')), '', 'an exhausted lookup budget ends the lookups');
-    ok(scalar @asked <= 1, 'without probing the other entries');
+    is(scalar @asked, 0, 'without any request, the candidate\'s included');
 }
 
 # ── a default owner id is the node name, resolved on the nodes both share ─────
@@ -161,6 +161,66 @@ is(scalar @asked, 0, 'before any cluster lookup');
     { no warnings 'once'; local $PVE::Storage::Custom::LightbitsPlugin::SYMLINK_DIR = "$tmp/dev2";
       $class->activate_storage('lb-b', $entries{'lb-b'}); }
     is(scalar @w, 0, 'no warning on a node where the pair does not collide');
+}
+
+# ── lookups: one request per endpoint, each against the deadline ──────────────
+{
+    my @eps;
+    no warnings qw(redefine once);
+    local *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
+        my ($scfg, $m, $path, $body, %o) = @_;
+        push @eps, [$scfg->{lb_api_host}, $o{timeout}];
+        die "500 Can't connect\n" if $scfg->{lb_api_host} =~ /^dead/;
+        return { UUID => 'same' };
+    };
+    %entries = ('lb-a' => lb(lb_api_host => 'dead1:443,alive-a:443'));
+    like(add_err('lb-b', lb(lb_api_host => 'dead2:443,alive-b:443')), qr/would share/, 'the lookup fails over to the next endpoint of an entry');
+    is_deeply([map { $_->[0] } @eps], ['dead2:443', 'alive-b:443', 'dead1:443', 'alive-a:443'], 'one endpoint per request');
+    ok(!(grep { $_->[1] > 3 } @eps), 'each request capped by the per-request timeout');
+}
+{
+    # A peer that cannot be reached in time is reported, not silently skipped.
+    no warnings qw(redefine once);
+    my $now = 1000;
+    local $PVE::Storage::Custom::LightbitsPlugin::PROBE_CLOCK = sub { $now };
+    local *PVE::Storage::Custom::LightbitsPlugin::_api = sub {
+        my ($scfg) = @_;
+        if ($scfg->{lb_api_host} =~ /^slow/) { $now += 20; die "500 read timeout\n"; }
+        return { UUID => 'same' };
+    };
+    %entries = ('lb-a' => lb(lb_api_host => 'slow:443'), 'lb-z' => lb(lb_api_host => 'z:443'));
+    my @w; local $SIG{__WARN__} = sub { push @w, @_ };
+    my $e = add_err('lb-new', lb(lb_api_host => 'new:443'));
+    is($e, '', 'budget used up by a slow peer: the change is not blocked');
+    like($w[0] // '', qr/could not check within 8s whether it shares a cluster with 'lb-z'/, 'but the unchecked entry is named in a warning');
+}
+
+# ── node name vs a hostname that carries a domain ─────────────────────────────
+{
+    no warnings qw(redefine once);
+    local *PVE::Storage::Custom::LightbitsPlugin::_hostname = sub { 'pve1.example.com' };
+    local $PVE::Storage::Custom::LightbitsPlugin::CLUSTER_NODES = sub { qw(pve1 pve2) };
+    %uuid_of = ();
+    %entries = ('lb-a' => lb(nodes => { pve1 => 1 }, lb_owner_id => 'pve1.example.com'));
+    like(add_err('lb-b', lb(nodes => { pve1 => 1 })), qr/owner id 'pve1\.example\.com'/, 'default owner is the full hostname on the node named by its short name');
+    %entries = ('lb-a' => lb(nodes => { pve1 => 1 }, lb_owner_id => 'pve1'));
+    is(add_err('lb-b', lb(nodes => { pve1 => 1 })), '', 'explicit short name vs a default owner that is the FQDN: different owners');
+}
+
+# ── activation warning looks only at what collides on this node ───────────────
+{
+    no warnings 'once';
+    local $PVE::Storage::Custom::LightbitsPlugin::SYMLINK_DIR = "$tmp/dev3";
+    local $PVE::Storage::Custom::LightbitsPlugin::FAILOVER_STATE_DIR = "$tmp/state3";
+    local $PVE::Storage::Custom::LightbitsPlugin::CLUSTER_NODES = sub { qw(pve1 pve2) };
+    my @w; local $SIG{__WARN__} = sub { push @w, @_ };
+    %entries = ('lb-a' => lb(lb_owner_id => 'pve2'), 'lb-b' => lb(), 'lb-z' => lb(lb_owner_id => 'pve1'));
+    $class->activate_storage('lb-b', $entries{'lb-b'});
+    like($w[0] // '', qr/shares its volumes with storage 'lb-z'/, 'a peer colliding elsewhere does not hide one colliding here');
+    @w = ();
+    %entries = ('lb-a' => lb(lb_owner_id => 'x', nodes => { pve2 => 1 }), 'lb-b' => lb(lb_owner_id => 'x'));
+    $class->activate_storage('lb-b', $entries{'lb-b'});
+    is(scalar @w, 0, 'a peer with the same explicit owner that is not active on this node is not reported here');
 }
 
 # ── entries that are not in the way ───────────────────────────────────────────
@@ -221,7 +281,7 @@ ok($class->activate_storage('lb-b', $entries{'lb-b'}), 'activate_storage still s
 is(scalar @warned, 1, 'one warning');
 like($warned[0], qr/^WARNING: Lightbits storage 'lb-b' shares its volumes with storage 'lb-a'/, 'naming both entries');
 is(scalar @asked, 0, 'without any API call');
-like($warned[0], qr/Disable or remove the entry that is not needed/, 'advising to drop one entry');
+like($warned[0], qr/move the guest disks that refer to the other one over first, then disable or remove it/, 'advising to move guest disks before dropping one entry');
 like($warned[0], qr/Do not change lb_owner_id or lb_project on an entry that already has disks/,
     'and not to change the owner id or project of an entry with disks');
 $class->activate_storage('lb-b', $entries{'lb-b'});
